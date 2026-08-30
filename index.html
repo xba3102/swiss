@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Swiss Chess Manager</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for in-browser JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans antialiased">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect } = React;
+
+        // Custom hook to sync state with LocalStorage for offline persistence
+        function useLocalStorage(key, initialValue) {
+            const [storedValue, setStoredValue] = useState(() => {
+                try {
+                    const item = window.localStorage.getItem(key);
+                    return item ? JSON.parse(item) : initialValue;
+                } catch (error) {
+                    console.error(error);
+                    return initialValue;
+                }
+            });
+
+            useEffect(() => {
+                try {
+                    window.localStorage.setItem(key, JSON.stringify(storedValue));
+                } catch (error) {
+                    console.error(error);
+                }
+            }, [key, storedValue]);
+
+            return [storedValue, setStoredValue];
+        }
+
+        const ChessTournamentApp = () => {
+            const [players, setPlayers] = useLocalStorage('chess_players', []);
+            const [matches, setMatches] = useLocalStorage('chess_matches', []);
+            const [currentRound, setCurrentRound] = useLocalStorage('chess_round', 0);
+            
+            const [isTeamMode, setIsTeamMode] = useLocalStorage('chess_team_mode', false);
+            const [boardsPerTeam, setBoardsPerTeam] = useLocalStorage('chess_boards', 5);
+            
+            const [tieBreakOrder, setTieBreakOrder] = useLocalStorage('chess_tb_order', [
+                { id: 'de', code: 'DE', name: 'Direct Encounter', enabled: true },
+                { id: 'bhc1', code: 'BHC1', name: 'Buchholz Cut 1', enabled: true },
+                { id: 'bh', code: 'BH', name: 'Buchholz', enabled: true },
+                { id: 'sb', code: 'SB', name: 'Sonneborn-Berger', enabled: true },
+                { id: 'wins', code: 'Wins', name: 'Most Wins', enabled: true }
+            ]);
+
+            const [activeTab, setActiveTab] = useState('setup');
+            const [winnerLimit, setWinnerLimit] = useState(3);
+            const [selectedHistoryRound, setSelectedHistoryRound] = useState(1);
+            
+            const TOURNAMENT_CATEGORIES = [
+                'Open', 
+                'Under 9 Boys', 'Under 9 Girls', 
+                'Under 12 Boys', 'Under 12 Girls', 
+                'Under 15 Boys', 'Under 15 Girls', 
+                'Under 18 Boys', 'Under 18 Girls', 
+                'Veteran'
+            ];
+            
+            const [newPlayerCategory, setNewPlayerCategory] = useState('Open');
+            const [standingsFilter, setStandingsFilter] = useState('All');
+            const [newPlayerName, setNewPlayerName] = useState('');
+            const [newPlayerRating, setNewPlayerRating] = useState('1500');
+            const [errorMessage, setErrorMessage] = useState('');
+
+            const addPlayer = (e) => {
+                e.preventDefault();
+                if (!newPlayerName.trim()) {
+                    setErrorMessage("Player name is required.");
+                    return;
+                }
+                const newPlayer = {
+                    id: Date.now().toString(),
+                    name: newPlayerName.trim(),
+                    rating: parseInt(newPlayerRating) || 1500,
+                    category: newPlayerCategory
+                };
+                
+                setPlayers([...players, newPlayer]);
+                setNewPlayerName('');
+                setErrorMessage('');
+            };
+
+            const removePlayer = (id) => {
+                setPlayers(players.filter(p => p.id !== id));
+            };
+
+            const moveTieBreak = (index, direction) => {
+                if (direction === -1 && index === 0) return;
+                if (direction === 1 && index === tieBreakOrder.length - 1) return;
+                const newOrder = [...tieBreakOrder];
+                const temp = newOrder[index];
+                newOrder[index] = newOrder[index + direction];
+                newOrder[index + direction] = temp;
+                setTieBreakOrder(newOrder);
+            };
+
+            const toggleTieBreak = (index) => {
+                const newOrder = [...tieBreakOrder];
+                newOrder[index].enabled = !newOrder[index].enabled;
+                setTieBreakOrder(newOrder);
+            };
+
+            const resetTournament = () => {
+                if(window.confirm("Are you sure you want to clear all data? This cannot be undone.")) {
+                    setPlayers([]);
+                    setMatches([]);
+                    setCurrentRound(0);
+                    setActiveTab('setup');
+                }
+            };
+
+            const computeStandings = (playerList, matchHistory, tbOrder, teamMode, boards) => {
+                if (playerList.length === 0) return [];
+
+                const stats = {};
+                playerList.forEach(p => {
+                    stats[p.id] = { 
+                        ...p, 
+                        score: 0, 
+                        matchPoints: 0,
+                        gamePoints: 0,
+                        wins: 0, 
+                        opponents: [], 
+                        results: {}, 
+                    };
+                });
+
+                matchHistory.filter(m => m.result).forEach(match => {
+                    const isBye = match.blackId === 'BYE';
+                    
+                    if (isBye) {
+                        stats[match.whiteId].matchPoints += 2;
+                        stats[match.whiteId].gamePoints += (teamMode ? boards : 1);
+                        stats[match.whiteId].score += (teamMode ? 2 : 1);
+                        stats[match.whiteId].wins += 1;
+                    } else {
+                        const white = stats[match.whiteId];
+                        const black = stats[match.blackId];
+                        
+                        white.opponents.push(match.blackId);
+                        black.opponents.push(match.whiteId);
+
+                        const [wScoreStr, bScoreStr] = match.result.split('-');
+                        const wScore = parseFloat(wScoreStr);
+                        const bScore = parseFloat(bScoreStr);
+
+                        white.gamePoints += wScore;
+                        black.gamePoints += bScore;
+
+                        if (wScore > bScore) {
+                            white.matchPoints += 2; white.wins += 1;
+                            white.results[match.blackId] = wScore;
+                            black.results[match.whiteId] = bScore;
+                        } else if (wScore < bScore) {
+                            black.matchPoints += 2; black.wins += 1;
+                            black.results[match.whiteId] = bScore;
+                            white.results[match.blackId] = wScore;
+                        } else {
+                            white.matchPoints += 1; black.matchPoints += 1;
+                            white.results[match.blackId] = wScore;
+                            black.results[match.whiteId] = bScore;
+                        }
+
+                        white.score = teamMode ? white.matchPoints : white.gamePoints;
+                        black.score = teamMode ? black.matchPoints : black.gamePoints;
+                    }
+                });
+
+                Object.values(stats).forEach(player => {
+                    let opponentScores = player.opponents.map(oppId => stats[oppId].score);
+                    
+                    player.tb_bh = opponentScores.reduce((a, b) => a + b, 0);
+                    
+                    if (opponentScores.length > 0) {
+                        const minScore = Math.min(...opponentScores);
+                        player.tb_bhc1 = player.tb_bh - minScore;
+                    } else {
+                        player.tb_bhc1 = 0;
+                    }
+
+                    player.tb_sb = player.opponents.reduce((total, oppId) => {
+                        return total + (stats[oppId].score * player.results[oppId]);
+                    }, 0);
+
+                    player.tb_wins = player.wins;
+                });
+
+                const scoreGroups = {};
+                Object.values(stats).forEach(p => {
+                    if (!scoreGroups[p.score]) scoreGroups[p.score] = [];
+                    scoreGroups[p.score].push(p.id);
+                });
+
+                Object.values(scoreGroups).forEach(group => {
+                    if (group.length > 1) {
+                        group.forEach(p1 => {
+                            let dePts = 0;
+                            group.forEach(p2 => {
+                                if (p1 !== p2 && stats[p1].results[p2] !== undefined) {
+                                    let headToHeadGamePoints = stats[p1].results[p2];
+                                    let opponentGamePoints = stats[p2].results[p1];
+                                    if (headToHeadGamePoints > opponentGamePoints) dePts += 2;
+                                    else if (headToHeadGamePoints === opponentGamePoints) dePts += 1;
+                                    else if (!teamMode) dePts += headToHeadGamePoints;
+                                }
+                            });
+                            stats[p1].tb_de = dePts;
+                        });
+                    } else {
+                        stats[group[0]].tb_de = 0;
+                    }
+                });
+
+                return Object.values(stats).sort((a, b) => {
+                    if (b.score !== a.score) return b.score - a.score;
+                    if (teamMode && b.gamePoints !== a.gamePoints) return b.gamePoints - a.gamePoints;
+                    
+                    const activeTBs = tbOrder.filter(tb => tb.enabled);
+                    for (const tb of activeTBs) {
+                        const valB = b[`tb_${tb.id}`] || 0;
+                        const valA = a[`tb_${tb.id}`] || 0;
+                        if (valB !== valA) return valB - valA;
+                    }
+                    return 0;
+                });
+            };
+
+            const standings = useMemo(() => {
+                return computeStandings(players, matches, tieBreakOrder, isTeamMode, boardsPerTeam);
+            }, [players, matches, tieBreakOrder, isTeamMode, boardsPerTeam]);
+
+            const historicalStandings = useMemo(() => {
+                const pastMatches = matches.filter(m => m.round <= selectedHistoryRound);
+                return computeStandings(players, pastMatches, tieBreakOrder, isTeamMode, boardsPerTeam);
+            }, [players, matches, selectedHistoryRound, tieBreakOrder, isTeamMode, boardsPerTeam]);
+
+            const generatePairings = () => {
+                if (players.length < 2) {
+                    setErrorMessage("Need at least 2 players to start.");
+                    return;
+                }
+
+                const currentMatches = matches.filter(m => m.round === currentRound);
+                if (currentRound > 0 && currentMatches.some(m => m.result === null)) {
+                    setErrorMessage("Please enter all results for the current round before advancing.");
+                    return;
+                }
+
+                setErrorMessage('');
+                const nextRound = currentRound + 1;
+                const sortedIds = standings.map(s => s.id);
+                let toPair = [...sortedIds];
+                let newMatches = [];
+                let paired = new Set();
+
+                const hasPlayed = (id1, id2) => {
+                    return matches.some(m => 
+                        (m.whiteId === id1 && m.blackId === id2) || 
+                        (m.whiteId === id2 && m.blackId === id1)
+                    );
+                };
+
+                for (let i = 0; i < toPair.length; i++) {
+                    let p1 = toPair[i];
+                    if (paired.has(p1)) continue;
+
+                    let p2 = null;
+                    for (let j = i + 1; j < toPair.length; j++) {
+                        let candidate = toPair[j];
+                        if (!paired.has(candidate) && !hasPlayed(p1, candidate)) {
+                            p2 = candidate;
+                            break;
+                        }
+                    }
+
+                    if (!p2) {
+                        for (let j = i + 1; j < toPair.length; j++) {
+                            let candidate = toPair[j];
+                            if (!paired.has(candidate)) {
+                                p2 = candidate;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (p2) {
+                        newMatches.push({
+                            id: `m-${nextRound}-${p1}-${p2}`,
+                            round: nextRound,
+                            whiteId: p1,
+                            blackId: p2,
+                            result: null
+                        });
+                        paired.add(p1);
+                        paired.add(p2);
+                    } else {
+                        newMatches.push({
+                            id: `m-${nextRound}-${p1}-BYE`,
+                            round: nextRound,
+                            whiteId: p1,
+                            blackId: 'BYE',
+                            result: '1-0'
+                        });
+                        paired.add(p1);
+                    }
+                }
+
+                setMatches([...matches, ...newMatches]);
+                setCurrentRound(nextRound);
+                setSelectedHistoryRound(nextRound);
+                setActiveTab('matches');
+            };
+
+            const setMatchResult = (matchId, result) => {
+                setMatches(matches.map(m => m.id === matchId ? { ...m, result } : m));
+            };
+
+            const getPlayerName = (id) => players.find(p => p.id === id)?.name || id;
+
+            const filteredStandings = useMemo(() => {
+                if (standingsFilter === 'All') return standings;
+                return standings.filter(p => (p.category || 'Open') === standingsFilter);
+            }, [standings, standingsFilter]);
+
+            const categoryWinners = useMemo(() => {
+                const grouped = {};
+                standings.forEach(player => {
+                    const cat = player.category || 'Open';
+                    if (!grouped[cat]) grouped[cat] = [];
+                    grouped[cat].push(player);
+                });
+                const sortedCategories = {};
+                Object.keys(grouped).sort().forEach(key => {
+                    sortedCategories[key] = grouped[key];
+                });
+                return sortedCategories;
+            }, [standings]);
+
+            const renderStandingsTable = (dataToRender, showFilter = true) => (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse whitespace-nowrap">
+                        <thead>
+                            <tr className="bg-slate-800 text-white text-xs uppercase tracking-wider">
+                                <th className="px-4 py-4 font-semibold text-center w-12 rounded-tl-lg">Rk</th>
+                                <th className="px-4 py-4 font-semibold">{isTeamMode ? 'Team' : 'Player'}</th>
+                                <th className="px-4 py-4 font-semibold">Category</th>
+                                <th className="px-4 py-4 font-semibold text-center">Rtg</th>
+                                <th className="px-4 py-4 font-bold text-emerald-400 text-center text-sm" title={isTeamMode ? "Match Points (2 = Win, 1 = Draw)" : "Points"}>
+                                    {isTeamMode ? 'MP' : 'Pts'}
+                                </th>
+                                {isTeamMode && (
+                                    <th className="px-4 py-4 font-bold text-sky-400 text-center text-sm" title="Game Points (Board Points)">
+                                        GP
+                                    </th>
+                                )}
+                                {tieBreakOrder.filter(tb => tb.enabled).map((tb, index) => (
+                                    <th key={tb.id} className="px-4 py-4 font-semibold text-center text-slate-300" title={tb.name}>
+                                        TB{index + 1}
+                                    </th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                            {dataToRender.map((player, index) => (
+                                <tr key={player.id} className="hover:bg-slate-50 transition-colors">
+                                    <td className="px-4 py-4 text-center font-bold text-slate-400">{index + 1}</td>
+                                    <td className="px-4 py-4 font-bold text-slate-800">{player.name}</td>
+                                    <td className="px-4 py-4 text-slate-600 text-sm">
+                                        <span className="bg-slate-100 px-2 py-1 rounded">
+                                            {player.category || 'Open'}
+                                        </span>
+                                    </td>
+                                    <td className="px-4 py-4 text-center text-slate-500 text-sm">{player.rating}</td>
+                                    <td className="px-4 py-4 text-center font-black text-indigo-600 text-lg">
+                                        {isTeamMode ? player.matchPoints : player.gamePoints}
+                                    </td>
+                                    {isTeamMode && (
+                                        <td className="px-4 py-4 text-center font-black text-sky-600 text-lg">
+                                            {player.gamePoints}
+                                        </td>
+                                    )}
+                                    {tieBreakOrder.filter(tb => tb.enabled).map((tb) => (
+                                        <td key={tb.id} className="px-4 py-4 text-center text-slate-500 text-sm font-medium">
+                                            {player[`tb_${tb.id}`]}
+                                        </td>
+                                    ))}
+                                </tr>
+                            ))}
+                            {dataToRender.length === 0 && (
+                                <tr>
+                                    <td colSpan={11} className="px-4 py-12 text-center text-slate-400">
+                                        No matches or players found.
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            );
+
+            return (
+                <div className="min-h-screen bg-slate-50 text-slate-800 font-sans p-4 md:p-8">
+                    <div className="max-w-6xl mx-auto">
+                        <header className="flex flex-col xl:flex-row justify-between items-center mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                            <div className="mb-4 xl:mb-0 text-center xl:text-left flex-1">
+                                <h1 className="text-3xl font-extrabold text-indigo-900 tracking-tight">Swiss Chess Manager</h1>
+                                <p className="text-slate-500 mt-1">Local Storage Mode • FIDE-Compliant Tie-Breaks</p>
+                            </div>
+                            
+                            <div className="flex flex-col xl:flex-row items-center gap-6">
+                                <div className="flex flex-wrap justify-center xl:justify-end gap-2 bg-slate-100 p-1 rounded-lg">
+                                    <button 
+                                        onClick={() => setActiveTab('setup')}
+                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'setup' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
+                                    >
+                                        Players
+                                    </button>
+                                    <button 
+                                        onClick={() => setActiveTab('matches')}
+                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'matches' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
+                                    >
+                                        Play Round {currentRound > 0 ? currentRound : ''}
+                                    </button>
+                                    <button 
+                                        onClick={() => setActiveTab('results')}
+                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'results' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
+                                    >
+                                        Results & History
+                                    </button>
+                                    <button 
+                                        onClick={() => setActiveTab('standings')}
+                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'standings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
+                                    >
+                                        Live Standings
+                                    </button>
+                                    <button 
+                                        onClick={() => setActiveTab('winners')}
+                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'winners' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
+                                    >
+                                        Winners
+                                    </button>
+                                    <button 
+                                        onClick={() => setActiveTab('settings')}
+                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'settings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
+                                    >
+                                        Settings
+                                    </button>
+                                </div>
+
+                                <div className="flex flex-col items-center xl:items-end gap-2">
+                                    <button 
+                                        onClick={resetTournament} 
+                                        className="text-xs bg-red-100 text-red-600 hover:bg-red-200 px-3 py-1.5 rounded-md font-semibold transition-colors border border-red-200">
+                                        Clear All Data
+                                    </button>
+                                </div>
+                            </div>
+                        </header>
+
+                        {errorMessage && (
+                            <div className="mb-6 p-4 bg-red-100 border-l-4 border-red-500 text-red-700 rounded shadow-sm font-medium flex justify-between">
+                                <span>{errorMessage}</span>
+                                <button onClick={() => setErrorMessage('')} className="text-red-700 font-bold">&times;</button>
+                            </div>
+                        )}
+
+                        {}
+                        {activeTab === 'setup' && (
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                <div className="p-6 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                                    <h2 className="text-xl font-bold text-slate-800">Tournament Roster</h2>
+                                    {currentRound === 0 && (
+                                        <button 
+                                            onClick={generatePairings}
+                                            className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold transition-colors shadow-sm"
+                                        >
+                                            Start Round 1
+                                        </button>
+                                    )}
+                                </div>
+                                
+                                <div className="p-6">
+                                    {currentRound === 0 && (
+                                        <>
+                                            <div className="mb-6 p-4 bg-slate-100 rounded-xl flex flex-wrap items-center gap-6 border border-slate-200">
+                                                <div className="flex items-center gap-3">
+                                                    <span className="font-semibold text-slate-700">Tournament Mode:</span>
+                                                    <select 
+                                                        value={isTeamMode ? 'team' : 'individual'}
+                                                        onChange={(e) => setIsTeamMode(e.target.value === 'team')}
+                                                        className="px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-medium bg-white"
+                                                    >
+                                                        <option value="individual">Individual</option>
+                                                        <option value="team">Team (Beregu)</option>
+                                                    </select>
+                                                </div>
+                                                {isTeamMode && (
+                                                    <div className="flex items-center gap-3 border-l border-slate-300 pl-6">
+                                                        <span className="font-semibold text-slate-700">Boards per Team:</span>
+                                                        <input 
+                                                            type="number" min="1" max="20" 
+                                                            value={boardsPerTeam} 
+                                                            onChange={(e) => setBoardsPerTeam(parseInt(e.target.value) || 1)} 
+                                                            className="w-24 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-medium text-center bg-white"
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <form onSubmit={addPlayer} className="flex flex-col md:flex-row gap-3 mb-8">
+                                                <input 
+                                                    type="text" 
+                                                    placeholder={isTeamMode ? "Team Name" : "Player Name"}
+                                                    value={newPlayerName}
+                                                    onChange={(e) => setNewPlayerName(e.target.value)}
+                                                    className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                                                />
+                                                <input 
+                                                    type="number" 
+                                                    placeholder={isTeamMode ? "Avg Rating" : "Rating"}
+                                                    value={newPlayerRating}
+                                                    onChange={(e) => setNewPlayerRating(e.target.value)}
+                                                    className="w-full md:w-32 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                                                />
+                                                <select
+                                                    value={newPlayerCategory}
+                                                    onChange={(e) => setNewPlayerCategory(e.target.value)}
+                                                    className="w-full md:w-48 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
+                                                >
+                                                    {TOURNAMENT_CATEGORIES.map(cat => (
+                                                        <option key={cat} value={cat}>{cat}</option>
+                                                    ))}
+                                                </select>
+                                                <button type="submit" className="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 rounded-lg font-semibold transition-colors shadow-sm">
+                                                    Add
+                                                </button>
+                                            </form>
+                                        </>
+                                    )}
+
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left border-collapse">
+                                            <thead>
+                                                <tr className="bg-slate-50 text-slate-500 text-sm uppercase tracking-wider">
+                                                    <th className="px-4 py-3 font-medium border-b border-slate-200">Name</th>
+                                                    <th className="px-4 py-3 font-medium border-b border-slate-200">Rating</th>
+                                                    <th className="px-4 py-3 font-medium border-b border-slate-200">Category</th>
+                                                    <th className="px-4 py-3 font-medium border-b border-slate-200">Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {players.length === 0 ? (
+                                                    <tr><td colSpan="4" className="px-4 py-8 text-center text-slate-400">No {isTeamMode ? 'teams' : 'players'} added yet.</td></tr>
+                                                ) : (
+                                                    players.map((p, index) => (
+                                                        <tr key={p.id} className="border-b border-slate-100 hover:bg-slate-50/50">
+                                                            <td className="px-4 py-3 font-medium text-slate-800">{index + 1}. {p.name}</td>
+                                                            <td className="px-4 py-3 text-slate-600">{p.rating}</td>
+                                                            <td className="px-4 py-3 text-slate-600">
+                                                                <span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-semibold">
+                                                                    {p.category || 'Open'}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-4 py-3">
+                                                                {currentRound === 0 && (
+                                                                    <button onClick={() => removePlayer(p.id)} className="text-red-500 hover:text-red-700 text-sm font-medium">Remove</button>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {}
+                        {activeTab === 'matches' && (
+                            <div className="space-y-6">
+                                {currentRound === 0 ? (
+                                    <div className="text-center py-12 bg-white rounded-2xl shadow-sm border border-slate-200">
+                                        <p className="text-slate-500 text-lg mb-4">Tournament hasn't started yet.</p>
+                                        <button 
+                                            onClick={generatePairings}
+                                            className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-bold shadow-md"
+                                        >
+                                            Generate Round 1
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="flex justify-between items-center bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                                            <h2 className="text-xl font-bold text-slate-800">Round {currentRound} Active Pairings</h2>
+                                            <button 
+                                                onClick={generatePairings}
+                                                className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold transition-colors shadow-sm"
+                                            >
+                                                Close Round & Generate Next
+                                            </button>
+                                        </div>
+                                        
+                                        <div className="grid gap-4 md:grid-cols-2">
+                                            {matches.filter(m => m.round === currentRound).map(match => (
+                                                <div key={match.id} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between">
+                                                    <div className="flex justify-between items-center mb-4">
+                                                        <div className="flex flex-col items-center flex-1">
+                                                            <div className="w-8 h-8 bg-slate-100 border-2 border-slate-300 rounded-full mb-2"></div>
+                                                            <span className="font-semibold text-slate-800 text-center">{getPlayerName(match.whiteId)}</span>
+                                                        </div>
+                                                        <div className="px-4 text-slate-400 font-medium text-sm">VS</div>
+                                                        <div className="flex flex-col items-center flex-1">
+                                                            {match.blackId !== 'BYE' && (
+                                                                <>
+                                                                    <div className="w-8 h-8 bg-slate-800 border-2 border-slate-300 rounded-full mb-2"></div>
+                                                                    <span className="font-semibold text-slate-800 text-center">{getPlayerName(match.blackId)}</span>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {match.blackId !== 'BYE' ? (
+                                                        <div className="flex justify-center gap-2 mt-4 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                                            {isTeamMode ? (
+                                                                <div className="flex flex-col items-center w-full">
+                                                                    <label className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">Set Match Result</label>
+                                                                    <select 
+                                                                        value={match.result ? match.result.split('-')[0] : ''}
+                                                                        onChange={(e) => {
+                                                                            if (e.target.value === '') return;
+                                                                            const w = parseFloat(e.target.value);
+                                                                            const b = boardsPerTeam - w;
+                                                                            setMatchResult(match.id, `${w}-${b}`);
+                                                                        }}
+                                                                        className="w-full max-w-xs px-4 py-3 border-2 border-indigo-200 rounded-lg font-bold text-center text-indigo-900 bg-white focus:outline-none focus:border-indigo-500 transition-colors cursor-pointer"
+                                                                    >
+                                                                        <option value="" disabled>Select Team Score...</option>
+                                                                        {Array.from({length: (boardsPerTeam * 2) + 1}).map((_, i) => {
+                                                                            const val = i * 0.5;
+                                                                            return (
+                                                                                <option key={val} value={val}>
+                                                                                    {val} - {boardsPerTeam - val}
+                                                                                </option>
+                                                                            );
+                                                                        })}
+                                                                    </select>
+                                                                </div>
+                                                            ) : (
+                                                                <>
+                                                                    <button 
+                                                                        onClick={() => setMatchResult(match.id, '1-0')}
+                                                                        className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${match.result === '1-0' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'}`}
+                                                                    >
+                                                                        1 - 0
+                                                                    </button>
+                                                                    <button 
+                                                                        onClick={() => setMatchResult(match.id, '0.5-0.5')}
+                                                                        className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${match.result === '0.5-0.5' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'}`}
+                                                                    >
+                                                                        ½ - ½
+                                                                    </button>
+                                                                    <button 
+                                                                        onClick={() => setMatchResult(match.id, '0-1')}
+                                                                        className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${match.result === '0-1' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'}`}
+                                                                    >
+                                                                        0 - 1
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-center mt-4 py-3 bg-emerald-50 border border-emerald-100 text-emerald-700 font-bold rounded-xl text-sm">
+                                                            Automatic Win (BYE)
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+
+                        {}
+                        {activeTab === 'results' && (
+                            <div className="space-y-6">
+                                {currentRound === 0 ? (
+                                    <div className="text-center py-12 bg-white rounded-2xl shadow-sm border border-slate-200">
+                                        <p className="text-slate-500 text-lg mb-4">No rounds have been played yet.</p>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 overflow-x-auto">
+                                            <div className="flex gap-2 min-w-max">
+                                                <span className="py-2 pr-4 font-bold text-slate-700">Select Round:</span>
+                                                {Array.from({length: currentRound}).map((_, i) => {
+                                                    const roundNum = i + 1;
+                                                    return (
+                                                        <button
+                                                            key={roundNum}
+                                                            onClick={() => setSelectedHistoryRound(roundNum)}
+                                                            className={`px-4 py-2 rounded-lg font-bold transition-all ${
+                                                                selectedHistoryRound === roundNum 
+                                                                    ? 'bg-indigo-600 text-white shadow-md' 
+                                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                            }`}
+                                                        >
+                                                            Round {roundNum}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+
+                                        <div className="grid lg:grid-cols-3 gap-6">
+                                            <div className="lg:col-span-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col max-h-[800px]">
+                                                <div className="p-4 border-b border-slate-100 bg-slate-50">
+                                                    <h3 className="font-bold text-slate-800 text-lg">Round {selectedHistoryRound} Results</h3>
+                                                </div>
+                                                <div className="overflow-y-auto p-4 space-y-3">
+                                                    {matches.filter(m => m.round === selectedHistoryRound).map((match, i) => (
+                                                        <div key={match.id} className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between text-sm">
+                                                            <div className="flex-1 text-right font-semibold text-slate-800 pr-3">
+                                                                {getPlayerName(match.whiteId)}
+                                                            </div>
+                                                            <div className="px-3 py-1 bg-white border border-slate-300 rounded font-bold text-indigo-700 whitespace-nowrap min-w-[3rem] text-center">
+                                                                {match.blackId === 'BYE' ? '1-0' : match.result || '-'}
+                                                            </div>
+                                                            <div className="flex-1 text-left font-semibold text-slate-800 pl-3">
+                                                                {match.blackId === 'BYE' ? '(BYE)' : getPlayerName(match.blackId)}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            <div className="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col max-h-[800px]">
+                                                <div className="p-4 border-b border-slate-100 bg-slate-50">
+                                                    <h3 className="font-bold text-slate-800 text-lg">Standings After Round {selectedHistoryRound}</h3>
+                                                    <p className="text-xs text-slate-500">Calculated based only on matches up to Round {selectedHistoryRound}.</p>
+                                                </div>
+                                                <div className="overflow-y-auto">
+                                                    {renderStandingsTable(historicalStandings, false)}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+
+                        {}
+                        {activeTab === 'standings' && (
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                <div className="p-6 border-b border-slate-100 bg-slate-50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                                    <div>
+                                        <h2 className="text-xl font-bold text-slate-800">Live Standings</h2>
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            Active Tie-Breaks: {tieBreakOrder.filter(tb => tb.enabled).map((tb, i) => `TB${i+1}: ${tb.code}`).join(' | ')}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold text-slate-600">Filter Category:</span>
+                                        <select 
+                                            value={standingsFilter}
+                                            onChange={(e) => setStandingsFilter(e.target.value)}
+                                            className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium focus:ring-2 focus:ring-indigo-500 bg-white"
+                                        >
+                                            <option value="All">All Categories</option>
+                                            {Array.from(new Set(players.map(p => p.category || 'Open'))).sort().map(cat => (
+                                                <option key={cat} value={cat}>{cat}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                </div>
+                                {renderStandingsTable(filteredStandings, true)}
+                            </div>
+                        )}
+
+                        {activeTab === 'winners' && (
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                <div className="p-6 border-b border-slate-100 bg-slate-50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                                    <div>
+                                        <h2 className="text-xl font-bold text-slate-800">Category Winners & Ranking Lists</h2>
+                                        <p className="text-sm text-slate-500 mt-1">Leaderboards by Category.</p>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-sm font-semibold text-slate-600">Show Winners Limit:</span>
+                                        <select 
+                                            value={winnerLimit}
+                                            onChange={(e) => setWinnerLimit(parseInt(e.target.value))}
+                                            className="px-3 py-1.5 border border-slate-300 rounded-lg text-sm font-bold text-indigo-700 bg-white focus:ring-2 focus:ring-indigo-500"
+                                        >
+                                            <option value={3}>Top 3</option>
+                                            <option value={5}>Top 5</option>
+                                            <option value={10}>Top 10</option>
+                                            <option value={15}>Top 15</option>
+                                            <option value={20}>Top 20</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                    {Object.entries(categoryWinners).map(([category, catPlayers]) => (
+                                        <div key={category} className="bg-white border border-slate-200 rounded-xl p-5 shadow-md flex flex-col">
+                                            <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+                                                <h3 className="text-lg font-extrabold text-indigo-900">{category}</h3>
+                                                <span className="text-xs bg-indigo-50 text-indigo-600 font-bold px-2.5 py-1 rounded-full">
+                                                    {catPlayers.length} Registered
+                                                </span>
+                                            </div>
+                                            <div className="space-y-3 flex-1 overflow-y-auto max-h-96 pr-1">
+                                                {catPlayers.slice(0, winnerLimit).map((player, index) => (
+                                                    <div key={player.id} className="flex items-center gap-3 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                                                        <div className={`flex items-center justify-center w-8 h-8 rounded-full font-black text-sm shadow-sm shrink-0
+                                                            ${index === 0 ? 'bg-yellow-100 text-yellow-700 border border-yellow-300' : 
+                                                            index === 1 ? 'bg-slate-200 text-slate-600 border border-slate-300' : 
+                                                            index === 2 ? 'bg-orange-100 text-orange-700 border border-orange-300' :
+                                                            'bg-white text-slate-500 border border-slate-200'}`}>
+                                                            {index + 1}
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <p className="font-bold text-slate-800 truncate text-sm">{player.name}</p>
+                                                            <p className="text-xs font-semibold text-slate-500 mt-0.5">
+                                                                {isTeamMode 
+                                                                    ? `${player.matchPoints} MP (${player.gamePoints} GP)` 
+                                                                    : `${player.score} Pts`}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                {catPlayers.length === 0 && (
+                                                    <p className="text-slate-400 text-sm italic text-center py-4">No players yet.</p>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {Object.keys(categoryWinners).length === 0 && (
+                                        <div className="col-span-full text-center py-12 text-slate-400 text-lg font-medium">
+                                            No categories found. Add players in the Setup tab.
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {}
+                        {activeTab === 'settings' && (
+                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                <div className="p-6 border-b border-slate-100 bg-slate-50">
+                                    <h2 className="text-xl font-bold text-slate-800">Tournament Settings</h2>
+                                    <p className="text-sm text-slate-500 mt-1">Configure Tie-Break priority and visibility.</p>
+                                </div>
+                                <div className="p-6">
+                                    <h3 className="text-lg font-semibold text-slate-800 mb-4">Tie-Break Order Priority</h3>
+                                    <div className="space-y-3 max-w-2xl">
+                                        {tieBreakOrder.map((tb, index) => (
+                                            <div key={tb.id} className="flex items-center justify-between p-4 bg-slate-50 border border-slate-200 rounded-lg">
+                                                <div className="flex items-center gap-3">
+                                                    <input 
+                                                        type="checkbox"
+                                                        checked={tb.enabled}
+                                                        onChange={() => toggleTieBreak(index)}
+                                                        className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500 cursor-pointer"
+                                                    />
+                                                    <span className={`font-medium ${tb.enabled ? 'text-slate-800' : 'text-slate-400 line-through'}`}>
+                                                        {tb.name} ({tb.code})
+                                                    </span>
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <button 
+                                                        onClick={() => moveTieBreak(index, -1)}
+                                                        disabled={index === 0}
+                                                        className="p-2 bg-white border border-slate-300 rounded hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed text-slate-600 shadow-sm"
+                                                        title="Move Priority Up"
+                                                    >
+                                                        ▲
+                                                    </button>
+                                                    <button 
+                                                        onClick={() => moveTieBreak(index, 1)}
+                                                        disabled={index === tieBreakOrder.length - 1}
+                                                        className="p-2 bg-white border border-slate-300 rounded hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed text-slate-600 shadow-sm"
+                                                        title="Move Priority Down"
+                                                    >
+                                                        ▼
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<ChessTournamentApp />);
+    </script>
+</body>
+</html>
