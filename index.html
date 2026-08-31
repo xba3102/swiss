@@ -88,7 +88,8 @@
                     id: Date.now().toString(),
                     name: newPlayerName.trim(),
                     rating: parseInt(newPlayerRating) || 1500,
-                    category: newPlayerCategory
+                    category: newPlayerCategory,
+                    colorHistory: [] // Tracks 'W' or 'B' per round
                 };
                 
                 setPlayers([...players, newPlayer]);
@@ -145,10 +146,12 @@
                     const isBye = match.blackId === 'BYE';
                     
                     if (isBye) {
-                        stats[match.whiteId].matchPoints += 2;
-                        stats[match.whiteId].gamePoints += (teamMode ? boards : 1);
-                        stats[match.whiteId].score += (teamMode ? 2 : 1);
-                        stats[match.whiteId].wins += 1;
+                        if (stats[match.whiteId]) {
+                            stats[match.whiteId].matchPoints += 2;
+                            stats[match.whiteId].gamePoints += (teamMode ? boards : 1);
+                            stats[match.whiteId].score += (teamMode ? 2 : 1);
+                            stats[match.whiteId].wins += 1;
+                        }
                     } else {
                         const white = stats[match.whiteId];
                         const black = stats[match.blackId];
@@ -254,6 +257,26 @@
                 return computeStandings(players, pastMatches, tieBreakOrder, isTeamMode, boardsPerTeam);
             }, [players, matches, selectedHistoryRound, tieBreakOrder, isTeamMode, boardsPerTeam]);
 
+            // Helper function to evaluate FIDE color preference
+            // Returns 'W' if player needs White, 'B' if player needs Black, or null if neutral
+            const getColorPreference = (player) => {
+                const history = player.colorHistory || [];
+                if (history.length === 0) return null;
+                
+                let wCount = history.filter(c => c === 'W').length;
+                let bCount = history.filter(c => c === 'B').length;
+
+                // Absolute restriction: Cannot have same color 3 times in a row
+                const lastTwo = history.slice(-2);
+                if (lastTwo.length === 2 && lastTwo[0] === lastTwo[1]) {
+                    return lastTwo[0] === 'W' ? 'B' : 'W';
+                }
+
+                if (wCount > bCount) return 'B';
+                if (bCount > wCount) return 'W';
+                return null;
+            };
+
             const generatePairings = () => {
                 if (players.length < 2) {
                     setErrorMessage("Need at least 2 players to start.");
@@ -282,52 +305,82 @@
                 };
 
                 for (let i = 0; i < toPair.length; i++) {
-                    let p1 = toPair[i];
-                    if (paired.has(p1)) continue;
+                    let p1Id = toPair[i];
+                    if (paired.has(p1Id)) continue;
 
-                    let p2 = null;
+                    let p2Id = null;
                     for (let j = i + 1; j < toPair.length; j++) {
                         let candidate = toPair[j];
-                        if (!paired.has(candidate) && !hasPlayed(p1, candidate)) {
-                            p2 = candidate;
+                        if (!paired.has(candidate) && !hasPlayed(p1Id, candidate)) {
+                            p2Id = candidate;
                             break;
                         }
                     }
 
-                    if (!p2) {
+                    if (!p2Id) {
                         for (let j = i + 1; j < toPair.length; j++) {
                             let candidate = toPair[j];
                             if (!paired.has(candidate)) {
-                                p2 = candidate;
+                                p2Id = candidate;
                                 break;
                             }
                         }
                     }
 
-                    if (p2) {
+                    if (p2Id) {
+                        // Determine Color Allocation between p1 and p2 using FIDE color preferences
+                        let p1Obj = players.find(p => p.id === p1Id);
+                        let p2Obj = players.find(p => p.id === p2Id);
+                        
+                        let whiteId = p1Id;
+                        let blackId = p2Id;
+
+                        let p1Pref = getColorPreference(p1Obj);
+                        let p2Pref = getColorPreference(p2Obj);
+
+                        if (p1Pref === 'B' && p2Pref !== 'B') {
+                            whiteId = p2Id;
+                            blackId = p1Id;
+                        } else if (p2Pref === 'W' && p1Pref !== 'W') {
+                            whiteId = p2Id;
+                            blackId = p1Id;
+                        }
+
                         newMatches.push({
-                            id: `m-${nextRound}-${p1}-${p2}`,
+                            id: `m-${nextRound}-${whiteId}-${blackId}`,
                             round: nextRound,
-                            whiteId: p1,
-                            blackId: p2,
+                            whiteId: whiteId,
+                            blackId: blackId,
                             result: null,
                             table: tableCounter++
                         });
-                        paired.add(p1);
-                        paired.add(p2);
+                        paired.add(p1Id);
+                        paired.add(p2Id);
                     } else {
                         newMatches.push({
-                            id: `m-${nextRound}-${p1}-BYE`,
+                            id: `m-${nextRound}-${p1Id}-BYE`,
                             round: nextRound,
-                            whiteId: p1,
+                            whiteId: p1Id,
                             blackId: 'BYE',
                             result: '1-0',
                             table: tableCounter++
                         });
-                        paired.add(p1);
+                        paired.add(p1Id);
                     }
                 }
 
+                // Update players color history for the records
+                const updatedPlayers = players.map(p => {
+                    const matchInNew = newMatches.find(m => m.whiteId === p.id || m.blackId === p.id);
+                    if (!matchInNew) return p;
+                    const colorAssigned = matchInNew.whiteId === p.id ? 'W' : 'B';
+                    return {
+                        ...p,
+                        colorHistory: [...(p.colorHistory || []), colorAssigned]
+                    };
+                });
+
+                setPlayers(updatedPlayers);
                 setMatches([...matches, ...newMatches]);
                 setCurrentRound(nextRound);
                 setSelectedHistoryRound(nextRound);
@@ -413,7 +466,7 @@
                         <header className="flex flex-col xl:flex-row justify-between items-center mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                             <div className="mb-4 xl:mb-0 text-center xl:text-left flex-1">
                                 <h1 className="text-3xl font-extrabold text-indigo-900 tracking-tight">Swiss Chess Manager</h1>
-                                <p className="text-slate-500 mt-1">Local Storage Mode • FIDE-Compliant Tie-Breaks</p>
+                                <p className="text-slate-500 mt-1">Local Storage Mode • FIDE-Compliant Color Balance & Tie-Breaks</p>
                             </div>
                             
                             <div className="flex flex-col xl:flex-row items-center gap-6">
@@ -610,14 +663,14 @@
                                                     </div>
                                                     <div className="flex justify-between items-center mb-4">
                                                         <div className="flex flex-col items-center flex-1">
-                                                            <div className="w-8 h-8 bg-slate-100 border-2 border-slate-300 rounded-full mb-2"></div>
+                                                            <div className="w-8 h-8 bg-white border-2 border-slate-400 rounded-full mb-2 shadow-inner" title="White Pieces"></div>
                                                             <span className="font-semibold text-slate-800 text-center">{getPlayerName(match.whiteId)}</span>
                                                         </div>
                                                         <div className="px-4 text-slate-400 font-medium text-sm">VS</div>
                                                         <div className="flex flex-col items-center flex-1">
                                                             {match.blackId !== 'BYE' && (
                                                                 <>
-                                                                    <div className="w-8 h-8 bg-slate-800 border-2 border-slate-300 rounded-full mb-2"></div>
+                                                                    <div className="w-8 h-8 bg-slate-800 border-2 border-slate-900 rounded-full mb-2 shadow-inner" title="Black Pieces"></div>
                                                                     <span className="font-semibold text-slate-800 text-center">{getPlayerName(match.blackId)}</span>
                                                                 </>
                                                             )}
