@@ -388,9 +388,17 @@
                 const handleLogin = async () => {
                     try {
                         setErrorMessage('');
+                        
+                        // Sistem pengesan sekatan keselamatan URL (file://)
+                        if (window.location.protocol === 'file:') {
+                            setErrorMessage("RALAT KESELAMATAN: Google Login disekat kerana anda membuka fail ini terus dari komputer (URL bermula dengan file://). Anda WAJIB menggunakan extension 'Live Server' di VS Code atau host fail ini di Netlify untuk membolehkan fungsi Log Masuk.");
+                            return;
+                        }
+
                         await signInWithPopup(auth, new GoogleAuthProvider());
                     } catch (e) {
-                        setErrorMessage("Login failed. Ensure pop-ups are allowed.");
+                        console.error("Ralat Log Masuk:", e);
+                        setErrorMessage("Login failed. Pastikan (1) pop-up tidak disekat, dan (2) localhost / 127.0.0.1 telah ditambah dalam 'Authorized domains' di Firebase Console (Menu Authentication > Settings).");
                     }
                 };
 
