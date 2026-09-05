@@ -54,11 +54,30 @@
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
             try {
-                // Safeguard against missing configurations
-                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-                if (!firebaseConfig || !firebaseConfig.projectId) {
-                    throw new Error("Pangkalan Data tidak ditemui. Sila pastikan aplikasi dijalankan dari persekitaran web yang sah.");
+                let firebaseConfig = null;
+                
+                // 1. Cuba dapatkan konfigurasi dari persekitaran awan (jika ada)
+                if (typeof __firebase_config !== 'undefined') {
+                    firebaseConfig = JSON.parse(__firebase_config);
+                } else {
+                    // ====================================================================
+                    // 2. MASUKKAN KONFIGURASI FIREBASE ANDA DI SINI UNTUK KEGUNAAN OFFLINE/LUAR
+                    // ====================================================================
+                    firebaseConfig = {
+                        apiKey: "AIzaSyCOg_ReJfOyAObEWag94bYHF44ZrZ1BVls",
+                        authDomain: "swiss-e11b3.firebaseapp.com",
+                        projectId: "swiss-e11b3",
+                        storageBucket: "swiss-e11b3.firebasestorage.app",
+                        messagingSenderId: "566006561687",
+                        appId: "1:566006561687:web:5a7898780005076e84a2d2",
+                        measurementId: "G-Z3681ZZ2G1"
+                    };
                 }
+                
+                if (!firebaseConfig || !firebaseConfig.projectId || firebaseConfig.projectId.includes("MASUKKAN")) {
+                    throw new Error("Pangkalan Data tidak disambungkan. Sila buka kod index.html dan masukkan Firebase Config anda sendiri (di baris ~58).");
+                }
+                
                 app = initializeApp(firebaseConfig);
                 auth = getAuth(app);
                 db = getFirestore(app);
