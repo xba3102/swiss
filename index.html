@@ -20,737 +20,780 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        window.FirebaseApp = { initializeApp };
-        window.FirebaseAuth = { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut };
-        window.FirebaseFirestore = { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection };
+        // Bundle all Firebase functions securely into a global object
+        window.FirebaseModules = {
+            initializeApp,
+            getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut,
+            getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection
+        };
+
+        // Broadcast an event to tell React that Firebase is fully ready
+        window.dispatchEvent(new Event('firebase-modules-ready'));
     </script>
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans antialiased">
-    <div id="root"></div>
+    <div id="root">
+        <!-- Temporary loading screen before React takes over -->
+        <div class="min-h-screen flex flex-col items-center justify-center">
+            <div class="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
+            <p class="mt-4 text-slate-500 font-semibold animate-pulse">Memuatkan Sistem...</p>
+        </div>
+    </div>
 
     <script type="text/babel">
-        const { initializeApp } = window.FirebaseApp;
-        const { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } = window.FirebaseAuth;
-        const { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } = window.FirebaseFirestore;
+        // MAIN ENTRY POINT (Waits for Firebase)
+        const startApp = () => {
+            const { 
+                initializeApp, getAuth, signInAnonymously, signInWithCustomToken, 
+                onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut,
+                getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection 
+            } = window.FirebaseModules;
 
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            let app, auth, db;
+            let initializationError = null;
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-        const { useState, useMemo, useEffect } = React;
-
-        const ChessTournamentApp = () => {
-            // URL Parameters for Public Viewer Mode
-            const urlParams = new URLSearchParams(window.location.search);
-            const publicUserId = urlParams.get('u');
-            const publicTourneyId = urlParams.get('t');
-            const isPublicViewer = !!(publicUserId && publicTourneyId);
-
-            const [user, setUser] = useState(null);
-            
-            // Database State
-            const [tournaments, setTournaments] = useState([]);
-            const [allPlayers, setAllPlayers] = useState([]);
-            const [allMatches, setAllMatches] = useState([]);
-            
-            // UI State
-            const [activeTournament, setActiveTournament] = useState(null);
-            const [activeTab, setActiveTab] = useState(isPublicViewer ? 'standings' : 'setup');
-            const [selectedHistoryRound, setSelectedHistoryRound] = useState(1);
-            const [isEditMode, setIsEditMode] = useState(false);
-            const [swapSource, setSwapSource] = useState(null);
-            const [errorMessage, setErrorMessage] = useState('');
-            const [copySuccess, setCopySuccess] = useState('');
-
-            // Modal States (To replace blocked prompt/confirm)
-            const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-            const [newTournamentName, setNewTournamentName] = useState('');
-            const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
-
-            // Form States
-            const [newPlayerCategory, setNewPlayerCategory] = useState('Open');
-            const [standingsFilter, setStandingsFilter] = useState('All');
-            const [newPlayerName, setNewPlayerName] = useState('');
-            const [newPlayerRating, setNewPlayerRating] = useState('1500');
-
-            const TOURNAMENT_CATEGORIES = [
-                'Open', 'Under 9 Boys', 'Under 9 Girls', 'Under 12 Boys', 'Under 12 Girls', 
-                'Under 15 Boys', 'Under 15 Girls', 'Under 18 Boys', 'Under 18 Girls', 'Veteran'
-            ];
-
-            const DEFAULT_TIE_BREAKS = [
-                { id: 'de', code: 'DE', name: 'Direct Encounter', enabled: true },
-                { id: 'bhc1', code: 'BHC1', name: 'Buchholz Cut 1', enabled: true },
-                { id: 'bh', code: 'BH', name: 'Buchholz', enabled: true },
-                { id: 'sb', code: 'SB', name: 'Sonneborn-Berger', enabled: true },
-                { id: 'wins', code: 'Wins', name: 'Most Wins', enabled: true }
-            ];
-
-            // 1. Initialize Auth
-            useEffect(() => {
-                const initAuth = async () => {
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
-                    } else {
-                        await signInAnonymously(auth);
-                    }
-                };
-                initAuth();
-
-                const unsubscribe = onAuthStateChanged(auth, (authUser) => {
-                    setUser(authUser);
-                    if (!authUser) setActiveTournament(null);
-                });
-                return () => unsubscribe();
-            }, []);
-
-            // 2. Fetch Data (Admin or Viewer)
-            useEffect(() => {
-                if (!user) return; // Guard: Wait for auth initialization
-                
-                const targetUserId = isPublicViewer ? publicUserId : user.uid;
-                if (!targetUserId) return;
-
-                const unsubTourneys = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'tournaments'), (snap) => {
-                    const tList = snap.docs.map(d => d.data());
-                    setTournaments(tList);
-                    if (isPublicViewer) {
-                        const t = tList.find(x => x.id === publicTourneyId);
-                        if (t) {
-                            setActiveTournament(t);
-                            if (t.currentRound > 0 && activeTab === 'setup') setActiveTab('standings');
-                        } else {
-                            setErrorMessage("Tournament not found or link is invalid.");
-                        }
-                    }
-                }, (error) => console.error("Error fetching tournaments:", error));
-
-                const unsubPlayers = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'players'), (snap) => {
-                    setAllPlayers(snap.docs.map(d => d.data()));
-                }, (error) => console.error("Error fetching players:", error));
-
-                const unsubMatches = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'matches'), (snap) => {
-                    setAllMatches(snap.docs.map(d => d.data()));
-                }, (error) => console.error("Error fetching matches:", error));
-
-                return () => {
-                    unsubTourneys();
-                    unsubPlayers();
-                    unsubMatches();
-                };
-            }, [user, isPublicViewer, publicUserId, publicTourneyId]);
-
-            const players = useMemo(() => allPlayers.filter(p => p.tournamentId === activeTournament?.id), [allPlayers, activeTournament]);
-            const matches = useMemo(() => allMatches.filter(m => m.tournamentId === activeTournament?.id), [allMatches, activeTournament]);
-
-            const handleLogin = async () => {
-                try {
-                    setErrorMessage('');
-                    await signInWithPopup(auth, new GoogleAuthProvider());
-                } catch (e) {
-                    setErrorMessage("Login failed. Ensure pop-ups are allowed.");
+            try {
+                // Safeguard against missing configurations
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+                if (!firebaseConfig || !firebaseConfig.projectId) {
+                    throw new Error("Pangkalan Data tidak ditemui. Sila pastikan aplikasi dijalankan dari persekitaran web yang sah.");
                 }
-            };
-
-            const copyShareLink = (tId) => {
-                if(!user) return;
-                const url = new URL(window.location.href);
-                url.searchParams.set('u', user.uid);
-                url.searchParams.set('t', tId);
-                navigator.clipboard.writeText(url.toString());
-                setCopySuccess(tId);
-                setTimeout(() => setCopySuccess(''), 3000);
-            };
-
-            const openCreateModal = () => {
-                setNewTournamentName('');
-                setIsCreateModalOpen(true);
-            };
-
-            const createNewTournament = async (e) => {
-                e.preventDefault();
-                if (!user) return;
-                const name = newTournamentName.trim();
-                if (!name) return;
-                const newTourney = {
-                    id: Date.now().toString(),
-                    name: name,
-                    createdAt: new Date().toISOString(),
-                    currentRound: 0,
-                    isTeamMode: false,
-                    boardsPerTeam: 5,
-                    tieBreakOrder: DEFAULT_TIE_BREAKS
-                };
-                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', newTourney.id), newTourney);
-                setIsCreateModalOpen(false);
-            };
-
-            const updateTournamentSettings = async (updates) => {
-                if (!user || !activeTournament || isPublicViewer) return;
-                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', activeTournament.id), updates, { merge: true });
-                setActiveTournament({ ...activeTournament, ...updates });
-            };
-
-            const addPlayer = async (e) => {
-                e.preventDefault();
-                if (!user || !activeTournament || isPublicViewer) return;
-                if (!newPlayerName.trim()) { setErrorMessage("Player name is required."); return; }
-                const newPlayer = {
-                    id: Date.now().toString(),
-                    tournamentId: activeTournament.id,
-                    name: newPlayerName.trim(),
-                    rating: parseInt(newPlayerRating) || 1500,
-                    category: newPlayerCategory,
-                    colorHistory: [] 
-                };
-                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', newPlayer.id), newPlayer);
-                setNewPlayerName('');
-            };
-
-            const removePlayer = async (id) => {
-                if (!user || isPublicViewer) return;
-                await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', id));
-            };
-
-            const computeStandings = (playerList, matchHistory, tbOrder, teamMode, boards) => {
-                if (playerList.length === 0) return [];
-                const stats = {};
-                playerList.forEach(p => {
-                    stats[p.id] = { ...p, score: 0, matchPoints: 0, gamePoints: 0, wins: 0, opponents: [], results: {}, };
-                });
-
-                matchHistory.filter(m => m.result).forEach(match => {
-                    const isBye = match.blackId === 'BYE';
-                    if (isBye) {
-                        if (stats[match.whiteId]) {
-                            stats[match.whiteId].matchPoints += 2; stats[match.whiteId].gamePoints += (teamMode ? boards : 1);
-                            stats[match.whiteId].score += (teamMode ? 2 : 1); stats[match.whiteId].wins += 1;
-                        }
-                    } else {
-                        const white = stats[match.whiteId]; const black = stats[match.blackId];
-                        if (white && black) {
-                            white.opponents.push(match.blackId); black.opponents.push(match.whiteId);
-                            const [wScoreStr, bScoreStr] = match.result.split('-');
-                            const wScore = parseFloat(wScoreStr); const bScore = parseFloat(bScoreStr);
-                            white.gamePoints += wScore; black.gamePoints += bScore;
-
-                            if (wScore > bScore) { white.matchPoints += 2; white.wins += 1; white.results[match.blackId] = wScore; black.results[match.whiteId] = bScore; } 
-                            else if (wScore < bScore) { black.matchPoints += 2; black.wins += 1; black.results[match.whiteId] = bScore; white.results[match.blackId] = wScore; } 
-                            else { white.matchPoints += 1; black.matchPoints += 1; white.results[match.blackId] = wScore; black.results[match.whiteId] = bScore; }
-
-                            white.score = teamMode ? white.matchPoints : white.gamePoints;
-                            black.score = teamMode ? black.matchPoints : black.gamePoints;
-                        }
-                    }
-                });
-
-                Object.values(stats).forEach(player => {
-                    let opponentScores = player.opponents.map(oppId => stats[oppId] ? stats[oppId].score : 0);
-                    player.tb_bh = opponentScores.reduce((a, b) => a + b, 0);
-                    if (opponentScores.length > 0) {
-                        const minScore = Math.min(...opponentScores);
-                        player.tb_bhc1 = player.tb_bh - minScore;
-                    } else { player.tb_bhc1 = 0; }
-                    player.tb_sb = player.opponents.reduce((total, oppId) => {
-                        const oppScore = stats[oppId] ? stats[oppId].score : 0;
-                        const resAgainstOpp = player.results[oppId] || 0;
-                        return total + (oppScore * resAgainstOpp);
-                    }, 0);
-                    player.tb_wins = player.wins;
-                });
-
-                return Object.values(stats).sort((a, b) => {
-                    if (b.score !== a.score) return b.score - a.score;
-                    if (teamMode && b.gamePoints !== a.gamePoints) return b.gamePoints - a.gamePoints;
-                    const activeTBs = tbOrder.filter(tb => tb.enabled);
-                    for (const tb of activeTBs) {
-                        const valB = b[`tb_${tb.id}`] || 0;
-                        const valA = a[`tb_${tb.id}`] || 0;
-                        if (valB !== valA) return valB - valA;
-                    }
-                    return 0;
-                });
-            };
-
-            const standings = useMemo(() => {
-                if(!activeTournament) return [];
-                return computeStandings(players, matches, activeTournament.tieBreakOrder, activeTournament.isTeamMode, activeTournament.boardsPerTeam);
-            }, [players, matches, activeTournament]);
-
-            const historicalStandings = useMemo(() => {
-                if(!activeTournament) return [];
-                const pastMatches = matches.filter(m => m.round <= selectedHistoryRound);
-                return computeStandings(players, pastMatches, activeTournament.tieBreakOrder, activeTournament.isTeamMode, activeTournament.boardsPerTeam);
-            }, [players, matches, selectedHistoryRound, activeTournament]);
-
-            const filteredStandings = useMemo(() => {
-                if (standingsFilter === 'All') return standings;
-                return standings.filter(p => (p.category || 'Open') === standingsFilter);
-            }, [standings, standingsFilter]);
-
-            // COLOR PREFERENCE LOGIC
-            const getColorPreference = (player) => {
-                const history = player.colorHistory || [];
-                if (history.length === 0) return null;
-                let wCount = history.filter(c => c === 'W').length;
-                let bCount = history.filter(c => c === 'B').length;
-                const lastTwo = history.slice(-2);
-                if (lastTwo.length === 2 && lastTwo[0] === lastTwo[1]) {
-                    return lastTwo[0] === 'W' ? 'B' : 'W'; // Force alternate if 2 in a row
-                }
-                if (wCount > bCount) return 'B';
-                if (bCount > wCount) return 'W';
-                return null; // Equal balance
-            };
-
-            const generatePairings = async () => {
-                if (!user || !activeTournament || isPublicViewer) return;
-                if (players.length < 2) { setErrorMessage("Need at least 2 players to start."); return; }
-
-                const currentRound = activeTournament.currentRound;
-                const currentMatches = matches.filter(m => m.round === currentRound);
-                if (currentRound > 0 && currentMatches.some(m => m.result === null)) {
-                    setErrorMessage("Please enter all results for the current round before advancing.");
-                    return;
-                }
-
-                setErrorMessage('');
-                const nextRound = currentRound + 1;
-                const sortedIds = standings.map(s => s.id);
-                let toPair = [...sortedIds];
-                let newMatches = [];
-                let paired = new Set();
-                let tableCounter = 1;
-
-                const hasPlayed = (id1, id2) => {
-                    return matches.some(m => (m.whiteId === id1 && m.blackId === id2) || (m.whiteId === id2 && m.blackId === id1));
-                };
-
-                for (let i = 0; i < toPair.length; i++) {
-                    let p1Id = toPair[i];
-                    if (paired.has(p1Id)) continue;
-
-                    let p2Id = null;
-                    for (let j = i + 1; j < toPair.length; j++) {
-                        let candidate = toPair[j];
-                        if (!paired.has(candidate) && !hasPlayed(p1Id, candidate)) {
-                            p2Id = candidate; break;
-                        }
-                    }
-
-                    if (!p2Id) {
-                        for (let j = i + 1; j < toPair.length; j++) {
-                            let candidate = toPair[j];
-                            if (!paired.has(candidate)) { p2Id = candidate; break; }
-                        }
-                    }
-
-                    if (p2Id) {
-                        let p1Obj = players.find(p => p.id === p1Id);
-                        let p2Obj = players.find(p => p.id === p2Id);
-                        
-                        let whiteId = p1Id; let blackId = p2Id;
-                        let p1Pref = getColorPreference(p1Obj);
-                        let p2Pref = getColorPreference(p2Obj);
-
-                        if (p1Pref === 'B' || p2Pref === 'W') {
-                            whiteId = p2Id; blackId = p1Id;
-                        } 
-
-                        newMatches.push({
-                            id: `m-${nextRound}-${whiteId}-${blackId}`, tournamentId: activeTournament.id,
-                            round: nextRound, whiteId: whiteId, blackId: blackId, result: null, table: tableCounter++
-                        });
-                        paired.add(p1Id); paired.add(p2Id);
-                    } else {
-                        newMatches.push({
-                            id: `m-${nextRound}-${p1Id}-BYE`, tournamentId: activeTournament.id,
-                            round: nextRound, whiteId: p1Id, blackId: 'BYE', result: '1-0', table: tableCounter++
-                        });
-                        paired.add(p1Id);
-                    }
-                }
-
-                for (const m of newMatches) {
-                    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', m.id), m);
-                }
-
-                // Update Color Histories
-                for (const p of players) {
-                    const matchInNew = newMatches.find(m => m.whiteId === p.id || m.blackId === p.id);
-                    if (matchInNew && matchInNew.blackId !== 'BYE') {
-                        const colorAssigned = matchInNew.whiteId === p.id ? 'W' : 'B';
-                        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', p.id), {
-                            colorHistory: [...(p.colorHistory || []), colorAssigned]
-                        }, { merge: true });
-                    }
-                }
-
-                await updateTournamentSettings({ currentRound: nextRound });
-                setSelectedHistoryRound(nextRound); setActiveTab('matches');
-                setIsEditMode(false); setSwapSource(null);
-            };
-
-            const setMatchResult = async (matchId, result) => {
-                if (!user || isPublicViewer) return;
-                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', matchId), { result }, { merge: true });
-            };
-
-            const handleSwapClick = async (matchId, role, playerId) => {
-                if (!user || isPublicViewer) return;
-                if (!swapSource) {
-                    setSwapSource({ matchId, role, playerId });
-                } else {
-                    if (swapSource.matchId === matchId && swapSource.role === role) { setSwapSource(null); return; }
-                    const match1 = matches.find(m => m.id === swapSource.matchId);
-                    const match2 = matches.find(m => m.id === matchId);
-                    
-                    if (match1 && match2) {
-                        const match1Updates = { [swapSource.role]: playerId, result: null };
-                        const match2Updates = { [role]: swapSource.playerId, result: null };
-                        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', match1.id), match1Updates, { merge: true });
-                        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', match2.id), match2Updates, { merge: true });
-                    }
-                    setSwapSource(null);
-                }
-            };
-
-            const getPlayerName = (id) => players.find(p => p.id === id)?.name || id;
-
-            const renderStandingsTable = (dataToRender) => {
-                const tbOrder = activeTournament?.tieBreakOrder || DEFAULT_TIE_BREAKS;
-                const isTeam = activeTournament?.isTeamMode;
-                return (
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-left border-collapse whitespace-nowrap">
-                            <thead>
-                                <tr className="bg-slate-800 text-white text-xs uppercase tracking-wider">
-                                    <th className="px-4 py-4 font-semibold text-center w-12 rounded-tl-lg">Rk</th>
-                                    <th className="px-4 py-4 font-semibold">{isTeam ? 'Team' : 'Player'}</th>
-                                    <th className="px-4 py-4 font-semibold">Category</th>
-                                    <th className="px-4 py-4 font-semibold text-center">Rtg</th>
-                                    <th className="px-4 py-4 font-bold text-emerald-400 text-center text-sm">{isTeam ? 'MP' : 'Pts'}</th>
-                                    {isTeam && <th className="px-4 py-4 font-bold text-sky-400 text-center text-sm">GP</th>}
-                                    {tbOrder.filter(tb => tb.enabled).map((tb, index) => (
-                                        <th key={tb.id} className="px-4 py-4 font-semibold text-center text-slate-300">TB{index + 1}</th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100">
-                                {dataToRender.map((player, index) => (
-                                    <tr key={player.id} className="hover:bg-slate-50 transition-colors">
-                                        <td className="px-4 py-4 text-center font-bold text-slate-400">{index + 1}</td>
-                                        <td className="px-4 py-4 font-bold text-slate-800">{player.name}</td>
-                                        <td className="px-4 py-4 text-slate-600 text-sm">
-                                            <span className="bg-slate-100 px-2 py-1 rounded">{player.category || 'Open'}</span>
-                                        </td>
-                                        <td className="px-4 py-4 text-center text-slate-500 text-sm">{player.rating}</td>
-                                        <td className="px-4 py-4 text-center font-black text-indigo-600 text-lg">
-                                            {isTeam ? player.matchPoints : player.gamePoints}
-                                        </td>
-                                        {isTeam && <td className="px-4 py-4 text-center font-black text-sky-600 text-lg">{player.gamePoints}</td>}
-                                        {tbOrder.filter(tb => tb.enabled).map((tb) => (
-                                            <td key={tb.id} className="px-4 py-4 text-center text-slate-500 text-sm font-medium">{player[`tb_${tb.id}`]}</td>
-                                        ))}
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                );
-            };
-
-            const isAnonymousUser = user && user.isAnonymous;
-            const isLoggedInAdmin = user && !user.isAnonymous;
-
-            // Login Screen (Only if not viewer and not logged in as admin)
-            if (!isLoggedInAdmin && !isPublicViewer) {
-                return (
-                    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
-                        <div className="max-w-md w-full bg-white p-8 rounded-2xl shadow-lg border border-slate-200 text-center">
-                            <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                                <span className="text-2xl">♟️</span>
-                            </div>
-                            <h1 className="text-2xl font-extrabold text-slate-800 mb-2">Swiss Manager Cloud</h1>
-                            <p className="text-slate-500 mb-8">Secure your tournaments. Log in with Google to manage your private chess events.</p>
-                            
-                            {errorMessage && <div className="mb-6 p-3 bg-red-100 border-l-4 border-red-500 text-red-700 text-sm text-left">{errorMessage}</div>}
-
-                            <button onClick={handleLogin} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-xl transition-all shadow-md flex items-center justify-center gap-2">
-                                <svg className="w-5 h-5 bg-white rounded-full p-0.5 text-indigo-600" viewBox="0 0 24 24" fill="currentColor">
-                                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
-                                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-                                </svg>
-                                Continue with Google
-                            </button>
-                        </div>
-                    </div>
-                );
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+            } catch (err) {
+                console.error("Firebase Initialization Failed:", err);
+                initializationError = err.message;
             }
 
-            // Dashboard (Admin only)
-            if (isLoggedInAdmin && !activeTournament && !isPublicViewer) {
-                return (
-                    <div className="min-h-screen bg-slate-50 p-4 md:p-8">
-                        <div className="max-w-4xl mx-auto">
-                            <header className="flex justify-between items-center mb-10 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                                <div>
-                                    <h1 className="text-2xl font-extrabold text-slate-800">My Tournaments</h1>
-                                    <p className="text-sm text-slate-500 mt-1">Logged in as {user.email}</p>
+            const { useState, useMemo, useEffect } = React;
+
+            const ChessTournamentApp = () => {
+                // If Firebase failed to start, show error instead of white screen
+                if (initializationError) {
+                    return (
+                        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+                            <div className="bg-white p-8 rounded-2xl shadow-lg max-w-md w-full border border-red-200 text-center">
+                                <div className="w-16 h-16 bg-red-100 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl">⚠️</div>
+                                <h1 className="text-xl font-bold text-slate-800 mb-2">Ralat Konfigurasi</h1>
+                                <p className="text-slate-500">{initializationError}</p>
+                            </div>
+                        </div>
+                    );
+                }
+
+                // URL Parameters for Public Viewer Mode
+                const urlParams = new URLSearchParams(window.location.search);
+                const publicUserId = urlParams.get('u');
+                const publicTourneyId = urlParams.get('t');
+                const isPublicViewer = !!(publicUserId && publicTourneyId);
+
+                const [user, setUser] = useState(null);
+                
+                // Database State
+                const [tournaments, setTournaments] = useState([]);
+                const [allPlayers, setAllPlayers] = useState([]);
+                const [allMatches, setAllMatches] = useState([]);
+                
+                // UI State
+                const [activeTournament, setActiveTournament] = useState(null);
+                const [activeTab, setActiveTab] = useState(isPublicViewer ? 'standings' : 'setup');
+                const [selectedHistoryRound, setSelectedHistoryRound] = useState(1);
+                const [isEditMode, setIsEditMode] = useState(false);
+                const [swapSource, setSwapSource] = useState(null);
+                const [errorMessage, setErrorMessage] = useState('');
+                const [copySuccess, setCopySuccess] = useState('');
+
+                // Modal States 
+                const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+                const [newTournamentName, setNewTournamentName] = useState('');
+                const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+
+                // Form States
+                const [newPlayerCategory, setNewPlayerCategory] = useState('Open');
+                const [standingsFilter, setStandingsFilter] = useState('All');
+                const [newPlayerName, setNewPlayerName] = useState('');
+                const [newPlayerRating, setNewPlayerRating] = useState('1500');
+
+                const TOURNAMENT_CATEGORIES = [
+                    'Open', 'Under 9 Boys', 'Under 9 Girls', 'Under 12 Boys', 'Under 12 Girls', 
+                    'Under 15 Boys', 'Under 15 Girls', 'Under 18 Boys', 'Under 18 Girls', 'Veteran'
+                ];
+
+                const DEFAULT_TIE_BREAKS = [
+                    { id: 'de', code: 'DE', name: 'Direct Encounter', enabled: true },
+                    { id: 'bhc1', code: 'BHC1', name: 'Buchholz Cut 1', enabled: true },
+                    { id: 'bh', code: 'BH', name: 'Buchholz', enabled: true },
+                    { id: 'sb', code: 'SB', name: 'Sonneborn-Berger', enabled: true },
+                    { id: 'wins', code: 'Wins', name: 'Most Wins', enabled: true }
+                ];
+
+                useEffect(() => {
+                    const initAuth = async () => {
+                        try {
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch(e) {
+                            console.error("Auth init error:", e);
+                        }
+                    };
+                    initAuth();
+
+                    const unsubscribe = onAuthStateChanged(auth, (authUser) => {
+                        setUser(authUser);
+                        if (!authUser) setActiveTournament(null);
+                    });
+                    return () => unsubscribe();
+                }, []);
+
+                useEffect(() => {
+                    if (!user) return; 
+                    
+                    const targetUserId = isPublicViewer ? publicUserId : user.uid;
+                    if (!targetUserId) return;
+
+                    const unsubTourneys = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'tournaments'), (snap) => {
+                        const tList = snap.docs.map(d => d.data());
+                        setTournaments(tList);
+                        if (isPublicViewer) {
+                            const t = tList.find(x => x.id === publicTourneyId);
+                            if (t) {
+                                setActiveTournament(t);
+                                if (t.currentRound > 0 && activeTab === 'setup') setActiveTab('standings');
+                            } else {
+                                setErrorMessage("Tournament not found or link is invalid.");
+                            }
+                        }
+                    }, (error) => console.error("Error fetching tournaments:", error));
+
+                    const unsubPlayers = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'players'), (snap) => {
+                        setAllPlayers(snap.docs.map(d => d.data()));
+                    }, (error) => console.error("Error fetching players:", error));
+
+                    const unsubMatches = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'matches'), (snap) => {
+                        setAllMatches(snap.docs.map(d => d.data()));
+                    }, (error) => console.error("Error fetching matches:", error));
+
+                    return () => {
+                        unsubTourneys();
+                        unsubPlayers();
+                        unsubMatches();
+                    };
+                }, [user, isPublicViewer, publicUserId, publicTourneyId]);
+
+                const players = useMemo(() => allPlayers.filter(p => p.tournamentId === activeTournament?.id), [allPlayers, activeTournament]);
+                const matches = useMemo(() => allMatches.filter(m => m.tournamentId === activeTournament?.id), [allMatches, activeTournament]);
+
+                const computeStandings = (playerList, matchHistory, tbOrder, teamMode, boards) => {
+                    if (playerList.length === 0) return [];
+                    const stats = {};
+                    playerList.forEach(p => {
+                        stats[p.id] = { ...p, score: 0, matchPoints: 0, gamePoints: 0, wins: 0, opponents: [], results: {}, };
+                    });
+
+                    matchHistory.filter(m => m.result).forEach(match => {
+                        const isBye = match.blackId === 'BYE';
+                        if (isBye) {
+                            if (stats[match.whiteId]) {
+                                stats[match.whiteId].matchPoints += 2; stats[match.whiteId].gamePoints += (teamMode ? boards : 1);
+                                stats[match.whiteId].score += (teamMode ? 2 : 1); stats[match.whiteId].wins += 1;
+                            }
+                        } else {
+                            const white = stats[match.whiteId]; const black = stats[match.blackId];
+                            if (white && black) {
+                                white.opponents.push(match.blackId); black.opponents.push(match.whiteId);
+                                const [wScoreStr, bScoreStr] = match.result.split('-');
+                                const wScore = parseFloat(wScoreStr); const bScore = parseFloat(bScoreStr);
+                                white.gamePoints += wScore; black.gamePoints += bScore;
+
+                                if (wScore > bScore) { white.matchPoints += 2; white.wins += 1; white.results[match.blackId] = wScore; black.results[match.whiteId] = bScore; } 
+                                else if (wScore < bScore) { black.matchPoints += 2; black.wins += 1; black.results[match.whiteId] = bScore; white.results[match.blackId] = wScore; } 
+                                else { white.matchPoints += 1; black.matchPoints += 1; white.results[match.blackId] = wScore; black.results[match.whiteId] = bScore; }
+
+                                white.score = teamMode ? white.matchPoints : white.gamePoints;
+                                black.score = teamMode ? black.matchPoints : black.gamePoints;
+                            }
+                        }
+                    });
+
+                    Object.values(stats).forEach(player => {
+                        let opponentScores = player.opponents.map(oppId => stats[oppId] ? stats[oppId].score : 0);
+                        player.tb_bh = opponentScores.reduce((a, b) => a + b, 0);
+                        if (opponentScores.length > 0) {
+                            const minScore = Math.min(...opponentScores);
+                            player.tb_bhc1 = player.tb_bh - minScore;
+                        } else { player.tb_bhc1 = 0; }
+                        player.tb_sb = player.opponents.reduce((total, oppId) => {
+                            const oppScore = stats[oppId] ? stats[oppId].score : 0;
+                            const resAgainstOpp = player.results[oppId] || 0;
+                            return total + (oppScore * resAgainstOpp);
+                        }, 0);
+                        player.tb_wins = player.wins;
+                    });
+
+                    return Object.values(stats).sort((a, b) => {
+                        if (b.score !== a.score) return b.score - a.score;
+                        if (teamMode && b.gamePoints !== a.gamePoints) return b.gamePoints - a.gamePoints;
+                        const activeTBs = tbOrder.filter(tb => tb.enabled);
+                        for (const tb of activeTBs) {
+                            const valB = b[`tb_${tb.id}`] || 0;
+                            const valA = a[`tb_${tb.id}`] || 0;
+                            if (valB !== valA) return valB - valA;
+                        }
+                        return 0;
+                    });
+                };
+
+                const standings = useMemo(() => {
+                    if(!activeTournament) return [];
+                    return computeStandings(players, matches, activeTournament.tieBreakOrder, activeTournament.isTeamMode, activeTournament.boardsPerTeam);
+                }, [players, matches, activeTournament]);
+
+                const historicalStandings = useMemo(() => {
+                    if(!activeTournament) return [];
+                    const pastMatches = matches.filter(m => m.round <= selectedHistoryRound);
+                    return computeStandings(players, pastMatches, activeTournament.tieBreakOrder, activeTournament.isTeamMode, activeTournament.boardsPerTeam);
+                }, [players, matches, selectedHistoryRound, activeTournament]);
+
+                const filteredStandings = useMemo(() => {
+                    if (standingsFilter === 'All') return standings;
+                    return standings.filter(p => (p.category || 'Open') === standingsFilter);
+                }, [standings, standingsFilter]);
+
+                const getColorPreference = (player) => {
+                    const history = player.colorHistory || [];
+                    if (history.length === 0) return null;
+                    let wCount = history.filter(c => c === 'W').length;
+                    let bCount = history.filter(c => c === 'B').length;
+                    const lastTwo = history.slice(-2);
+                    if (lastTwo.length === 2 && lastTwo[0] === lastTwo[1]) {
+                        return lastTwo[0] === 'W' ? 'B' : 'W'; 
+                    }
+                    if (wCount > bCount) return 'B';
+                    if (bCount > wCount) return 'W';
+                    return null; 
+                };
+
+                const generatePairings = async () => {
+                    if (!user || !activeTournament || isPublicViewer) return;
+                    if (players.length < 2) { setErrorMessage("Need at least 2 players to start."); return; }
+
+                    const currentRound = activeTournament.currentRound;
+                    const currentMatches = matches.filter(m => m.round === currentRound);
+                    if (currentRound > 0 && currentMatches.some(m => m.result === null)) {
+                        setErrorMessage("Please enter all results for the current round before advancing.");
+                        return;
+                    }
+
+                    setErrorMessage('');
+                    const nextRound = currentRound + 1;
+                    const sortedIds = standings.map(s => s.id);
+                    let toPair = [...sortedIds];
+                    let newMatches = [];
+                    let paired = new Set();
+                    let tableCounter = 1;
+
+                    const hasPlayed = (id1, id2) => {
+                        return matches.some(m => (m.whiteId === id1 && m.blackId === id2) || (m.whiteId === id2 && m.blackId === id1));
+                    };
+
+                    for (let i = 0; i < toPair.length; i++) {
+                        let p1Id = toPair[i];
+                        if (paired.has(p1Id)) continue;
+
+                        let p2Id = null;
+                        for (let j = i + 1; j < toPair.length; j++) {
+                            let candidate = toPair[j];
+                            if (!paired.has(candidate) && !hasPlayed(p1Id, candidate)) {
+                                p2Id = candidate; break;
+                            }
+                        }
+
+                        if (!p2Id) {
+                            for (let j = i + 1; j < toPair.length; j++) {
+                                let candidate = toPair[j];
+                                if (!paired.has(candidate)) { p2Id = candidate; break; }
+                            }
+                        }
+
+                        if (p2Id) {
+                            let p1Obj = players.find(p => p.id === p1Id);
+                            let p2Obj = players.find(p => p.id === p2Id);
+                            
+                            let whiteId = p1Id; let blackId = p2Id;
+                            let p1Pref = getColorPreference(p1Obj);
+                            let p2Pref = getColorPreference(p2Obj);
+
+                            if (p1Pref === 'B' || p2Pref === 'W') {
+                                whiteId = p2Id; blackId = p1Id;
+                            } 
+
+                            newMatches.push({
+                                id: `m-${nextRound}-${whiteId}-${blackId}`, tournamentId: activeTournament.id,
+                                round: nextRound, whiteId: whiteId, blackId: blackId, result: null, table: tableCounter++
+                            });
+                            paired.add(p1Id); paired.add(p2Id);
+                        } else {
+                            newMatches.push({
+                                id: `m-${nextRound}-${p1Id}-BYE`, tournamentId: activeTournament.id,
+                                round: nextRound, whiteId: p1Id, blackId: 'BYE', result: '1-0', table: tableCounter++
+                            });
+                            paired.add(p1Id);
+                        }
+                    }
+
+                    for (const m of newMatches) {
+                        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', m.id), m);
+                    }
+
+                    // Update Color Histories
+                    for (const p of players) {
+                        const matchInNew = newMatches.find(m => m.whiteId === p.id || m.blackId === p.id);
+                        if (matchInNew && matchInNew.blackId !== 'BYE') {
+                            const colorAssigned = matchInNew.whiteId === p.id ? 'W' : 'B';
+                            await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', p.id), {
+                                colorHistory: [...(p.colorHistory || []), colorAssigned]
+                            }, { merge: true });
+                        }
+                    }
+
+                    await updateTournamentSettings({ currentRound: nextRound });
+                    setSelectedHistoryRound(nextRound); setActiveTab('matches');
+                    setIsEditMode(false); setSwapSource(null);
+                };
+
+                const handleLogin = async () => {
+                    try {
+                        setErrorMessage('');
+                        await signInWithPopup(auth, new GoogleAuthProvider());
+                    } catch (e) {
+                        setErrorMessage("Login failed. Ensure pop-ups are allowed.");
+                    }
+                };
+
+                const copyShareLink = (tId) => {
+                    if(!user) return;
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('u', user.uid);
+                    url.searchParams.set('t', tId);
+                    navigator.clipboard.writeText(url.toString());
+                    setCopySuccess(tId);
+                    setTimeout(() => setCopySuccess(''), 3000);
+                };
+
+                const createNewTournament = async (e) => {
+                    e.preventDefault();
+                    if (!user) return;
+                    const name = newTournamentName.trim();
+                    if (!name) return;
+                    const newTourney = {
+                        id: Date.now().toString(),
+                        name: name,
+                        createdAt: new Date().toISOString(),
+                        currentRound: 0,
+                        isTeamMode: false,
+                        boardsPerTeam: 5,
+                        tieBreakOrder: DEFAULT_TIE_BREAKS
+                    };
+                    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', newTourney.id), newTourney);
+                    setIsCreateModalOpen(false);
+                };
+
+                const updateTournamentSettings = async (updates) => {
+                    if (!user || !activeTournament || isPublicViewer) return;
+                    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', activeTournament.id), updates, { merge: true });
+                    setActiveTournament({ ...activeTournament, ...updates });
+                };
+
+                const addPlayer = async (e) => {
+                    e.preventDefault();
+                    if (!user || !activeTournament || isPublicViewer) return;
+                    if (!newPlayerName.trim()) { setErrorMessage("Player name is required."); return; }
+                    const newPlayer = {
+                        id: Date.now().toString(),
+                        tournamentId: activeTournament.id,
+                        name: newPlayerName.trim(),
+                        rating: parseInt(newPlayerRating) || 1500,
+                        category: newPlayerCategory,
+                        colorHistory: [] 
+                    };
+                    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', newPlayer.id), newPlayer);
+                    setNewPlayerName('');
+                };
+
+                const removePlayer = async (id) => {
+                    if (!user || isPublicViewer) return;
+                    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', id));
+                };
+
+                const setMatchResult = async (matchId, result) => {
+                    if (!user || isPublicViewer) return;
+                    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', matchId), { result }, { merge: true });
+                };
+
+                const handleSwapClick = async (matchId, role, playerId) => {
+                    if (!user || isPublicViewer) return;
+                    if (!swapSource) {
+                        setSwapSource({ matchId, role, playerId });
+                    } else {
+                        if (swapSource.matchId === matchId && swapSource.role === role) { setSwapSource(null); return; }
+                        const match1 = matches.find(m => m.id === swapSource.matchId);
+                        const match2 = matches.find(m => m.id === matchId);
+                        
+                        if (match1 && match2) {
+                            const match1Updates = { [swapSource.role]: playerId, result: null };
+                            const match2Updates = { [role]: swapSource.playerId, result: null };
+                            await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', match1.id), match1Updates, { merge: true });
+                            await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', match2.id), match2Updates, { merge: true });
+                        }
+                        setSwapSource(null);
+                    }
+                };
+
+                const getPlayerName = (id) => {
+                    const p = players.find(p => p.id === id);
+                    return p ? p.name : id;
+                };
+
+                const renderStandingsTable = (dataToRender) => {
+                    const tbOrder = activeTournament?.tieBreakOrder || DEFAULT_TIE_BREAKS;
+                    const isTeam = activeTournament?.isTeamMode;
+                    return (
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left border-collapse whitespace-nowrap">
+                                <thead>
+                                    <tr className="bg-slate-800 text-white text-xs uppercase tracking-wider">
+                                        <th className="px-4 py-4 font-semibold text-center w-12 rounded-tl-lg">Rk</th>
+                                        <th className="px-4 py-4 font-semibold">{isTeam ? 'Team' : 'Player'}</th>
+                                        <th className="px-4 py-4 font-semibold">Category</th>
+                                        <th className="px-4 py-4 font-semibold text-center">Rtg</th>
+                                        <th className="px-4 py-4 font-bold text-emerald-400 text-center text-sm">{isTeam ? 'MP' : 'Pts'}</th>
+                                        {isTeam && <th className="px-4 py-4 font-bold text-sky-400 text-center text-sm">GP</th>}
+                                        {tbOrder.filter(tb => tb.enabled).map((tb, index) => (
+                                            <th key={tb.id} className="px-4 py-4 font-semibold text-center text-slate-300">TB{index + 1}</th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {dataToRender.map((player, index) => (
+                                        <tr key={player.id} className="hover:bg-slate-50 transition-colors">
+                                            <td className="px-4 py-4 text-center font-bold text-slate-400">{index + 1}</td>
+                                            <td className="px-4 py-4 font-bold text-slate-800">{player.name}</td>
+                                            <td className="px-4 py-4 text-slate-600 text-sm">
+                                                <span className="bg-slate-100 px-2 py-1 rounded">{player.category || 'Open'}</span>
+                                            </td>
+                                            <td className="px-4 py-4 text-center text-slate-500 text-sm">{player.rating}</td>
+                                            <td className="px-4 py-4 text-center font-black text-indigo-600 text-lg">
+                                                {isTeam ? player.matchPoints : player.gamePoints}
+                                            </td>
+                                            {isTeam && <td className="px-4 py-4 text-center font-black text-sky-600 text-lg">{player.gamePoints}</td>}
+                                            {tbOrder.filter(tb => tb.enabled).map((tb) => (
+                                                <td key={tb.id} className="px-4 py-4 text-center text-slate-500 text-sm font-medium">{player[`tb_${tb.id}`]}</td>
+                                            ))}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    );
+                };
+
+                const isAnonymousUser = user && user.isAnonymous;
+                const isLoggedInAdmin = user && !user.isAnonymous;
+
+                if (!isLoggedInAdmin && !isPublicViewer) {
+                    return (
+                        <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+                            <div className="max-w-md w-full bg-white p-8 rounded-2xl shadow-lg border border-slate-200 text-center">
+                                <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                                    <span className="text-2xl">♟️</span>
                                 </div>
-                                <div className="flex gap-3">
-                                    <button onClick={openCreateModal} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-5 rounded-lg transition-all shadow-sm">+ New</button>
-                                    <button onClick={() => signOut(auth)} className="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded-lg transition-all">Logout</button>
+                                <h1 className="text-2xl font-extrabold text-slate-800 mb-2">Swiss Manager Cloud</h1>
+                                <p className="text-slate-500 mb-8">Secure your tournaments. Log in with Google to manage your private chess events.</p>
+                                
+                                {errorMessage && <div className="mb-6 p-3 bg-red-100 border-l-4 border-red-500 text-red-700 text-sm text-left">{errorMessage}</div>}
+
+                                <button onClick={handleLogin} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-xl transition-all shadow-md flex items-center justify-center gap-2">
+                                    <svg className="w-5 h-5 bg-white rounded-full p-0.5 text-indigo-600" viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                                        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                                        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                                        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                                    </svg>
+                                    Continue with Google
+                                </button>
+                            </div>
+                        </div>
+                    );
+                }
+
+                if (isLoggedInAdmin && !activeTournament && !isPublicViewer) {
+                    return (
+                        <div className="min-h-screen bg-slate-50 p-4 md:p-8">
+                            <div className="max-w-4xl mx-auto">
+                                <header className="flex justify-between items-center mb-10 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                    <div>
+                                        <h1 className="text-2xl font-extrabold text-slate-800">My Tournaments</h1>
+                                        <p className="text-sm text-slate-500 mt-1">Logged in as {user.email}</p>
+                                    </div>
+                                    <div className="flex gap-3">
+                                        <button onClick={() => {setNewTournamentName(''); setIsCreateModalOpen(true);}} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-5 rounded-lg transition-all shadow-sm">+ New</button>
+                                        <button onClick={() => signOut(auth)} className="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded-lg transition-all">Logout</button>
+                                    </div>
+                                </header>
+
+                                {/* Create Modal */}
+                                {isCreateModalOpen && (
+                                    <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4">
+                                        <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+                                            <h2 className="text-xl font-bold mb-4">Create New Tournament</h2>
+                                            <form onSubmit={createNewTournament}>
+                                                <input 
+                                                    type="text" autoFocus
+                                                    placeholder="Enter Tournament Name" 
+                                                    value={newTournamentName}
+                                                    onChange={(e) => setNewTournamentName(e.target.value)}
+                                                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 outline-none mb-6"
+                                                />
+                                                <div className="flex justify-end gap-3">
+                                                    <button type="button" onClick={() => setIsCreateModalOpen(false)} className="px-4 py-2 font-bold text-slate-600 bg-slate-100 rounded-lg">Cancel</button>
+                                                    <button type="submit" className="px-4 py-2 font-bold text-white bg-indigo-600 rounded-lg">Create</button>
+                                                </div>
+                                            </form>
+                                        </div>
+                                    </div>
+                                )}
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {tournaments.map(t => (
+                                        <div key={t.id} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col">
+                                            <h3 className="text-lg font-bold text-indigo-900 mb-1">{t.name}</h3>
+                                            <p className="text-xs text-slate-400 mb-4">Created: {new Date(t.createdAt).toLocaleDateString()}</p>
+                                            
+                                            <div className="mt-auto flex justify-between items-center gap-2">
+                                                <button onClick={() => setActiveTournament(t)} className="flex-1 bg-slate-100 hover:bg-indigo-50 text-indigo-700 font-bold py-2 px-4 rounded-lg text-center transition-colors">
+                                                    Open Dashboard
+                                                </button>
+                                                <button onClick={() => copyShareLink(t.id)} className={`py-2 px-4 font-bold rounded-lg transition-colors ${copySuccess === t.id ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-600'}`}>
+                                                    {copySuccess === t.id ? '✓ Copied' : '🔗 Share'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+
+                if(isPublicViewer && !activeTournament) {
+                    return <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+                        <p className="text-slate-500 font-bold text-lg animate-pulse">Loading Tournament Data...</p>
+                    </div>;
+                }
+
+                return (
+                    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans p-4 md:p-8">
+                        <div className="max-w-6xl mx-auto">
+                            <header className="flex flex-col xl:flex-row justify-between items-center mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                <div className="mb-4 xl:mb-0 text-center xl:text-left flex flex-col items-start">
+                                    {!isPublicViewer && (
+                                        <button onClick={() => setActiveTournament(null)} className="text-sm text-slate-500 hover:text-indigo-600 mb-2 font-semibold">← Dashboard</button>
+                                    )}
+                                    <h1 className="text-2xl md:text-3xl font-extrabold text-indigo-900 tracking-tight">{activeTournament?.name}</h1>
+                                    {isPublicViewer && <span className="bg-indigo-100 text-indigo-800 text-xs font-bold px-2 py-1 rounded mt-2">Public Viewer Mode</span>}
+                                </div>
+                                
+                                <div className="flex gap-2 bg-slate-100 p-1 rounded-lg flex-wrap justify-center">
+                                    {!isPublicViewer && <button onClick={() => setActiveTab('setup')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'setup' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Players</button>}
+                                    <button onClick={() => setActiveTab('standings')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'standings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Live Standings</button>
+                                    <button onClick={() => setActiveTab('matches')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'matches' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Round {activeTournament?.currentRound > 0 ? activeTournament.currentRound : ''}</button>
+                                    <button onClick={() => setActiveTab('results')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'results' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>History</button>
+                                    {!isPublicViewer && <button onClick={() => setActiveTab('settings')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'settings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Settings</button>}
                                 </div>
                             </header>
 
-                            {/* Create Tournament Modal */}
-                            {isCreateModalOpen && (
-                                <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4">
-                                    <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
-                                        <h2 className="text-xl font-bold mb-4">Create New Tournament</h2>
-                                        <form onSubmit={createNewTournament}>
-                                            <input 
-                                                type="text" 
-                                                autoFocus
-                                                placeholder="Enter Tournament Name (e.g. 'School Open 2026')" 
-                                                value={newTournamentName}
-                                                onChange={(e) => setNewTournamentName(e.target.value)}
-                                                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none mb-6"
-                                            />
-                                            <div className="flex justify-end gap-3">
-                                                <button type="button" onClick={() => setIsCreateModalOpen(false)} className="px-4 py-2 font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
-                                                <button type="submit" className="px-4 py-2 font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg">Create</button>
-                                            </div>
-                                        </form>
+                            {}
+                            {!isPublicViewer && activeTab === 'setup' && (
+                                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                                    <div className="p-6 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                                        <h2 className="text-xl font-bold text-slate-800">Tournament Roster</h2>
+                                        {activeTournament.currentRound === 0 && (
+                                            <button onClick={generatePairings} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold shadow-sm">Start Round 1</button>
+                                        )}
+                                    </div>
+                                    <div className="p-6">
+                                        {activeTournament.currentRound === 0 && (
+                                            <form onSubmit={addPlayer} className="flex flex-col md:flex-row gap-3 mb-8">
+                                                <input type="text" placeholder="Name" value={newPlayerName} onChange={(e) => setNewPlayerName(e.target.value)} className="flex-1 px-4 py-2 border rounded-lg focus:ring-2" />
+                                                <input type="number" placeholder="Rating" value={newPlayerRating} onChange={(e) => setNewPlayerRating(e.target.value)} className="w-32 px-4 py-2 border rounded-lg focus:ring-2" />
+                                                <select value={newPlayerCategory} onChange={(e) => setNewPlayerCategory(e.target.value)} className="px-4 py-2 border rounded-lg focus:ring-2 bg-white">
+                                                    {TOURNAMENT_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                                                </select>
+                                                <button type="submit" className="bg-emerald-500 text-white px-6 py-2 rounded-lg font-semibold">Add</button>
+                                            </form>
+                                        )}
+                                        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                            {players.map((p, i) => (
+                                                <div key={p.id} className="p-3 bg-slate-50 border border-slate-200 rounded flex justify-between items-center">
+                                                    <div><span className="font-bold">{i+1}. {p.name}</span> <span className="text-xs text-slate-500">({p.rating})</span></div>
+                                                    {activeTournament.currentRound === 0 && <button onClick={() => removePlayer(p.id)} className="text-red-500 text-sm font-bold">X</button>}
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
                                 </div>
                             )}
 
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                {tournaments.map(t => (
-                                    <div key={t.id} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col">
-                                        <h3 className="text-lg font-bold text-indigo-900 mb-1">{t.name}</h3>
-                                        <p className="text-xs text-slate-400 mb-4">Created: {new Date(t.createdAt).toLocaleDateString()}</p>
-                                        
-                                        <div className="mt-auto flex justify-between items-center gap-2">
-                                            <button onClick={() => setActiveTournament(t)} className="flex-1 bg-slate-100 hover:bg-indigo-50 text-indigo-700 font-bold py-2 px-4 rounded-lg text-center transition-colors">
-                                                Open Dashboard
-                                            </button>
-                                            <button onClick={() => copyShareLink(t.id)} className={`py-2 px-4 font-bold rounded-lg transition-colors ${copySuccess === t.id ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-600'}`}>
-                                                {copySuccess === t.id ? '✓ Copied' : '🔗 Share'}
-                                            </button>
+                            {}
+                            {activeTab === 'matches' && (
+                                <div className="space-y-6">
+                                    {activeTournament.currentRound === 0 ? (
+                                        <div className="text-center py-12 bg-white rounded-2xl shadow-sm border border-slate-200">
+                                            <p className="text-slate-500 mb-4">Tournament hasn't started yet.</p>
+                                            {!isPublicViewer && <button onClick={generatePairings} className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold">Generate Round 1</button>}
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <div className="flex flex-col md:flex-row justify-between items-center bg-white p-5 rounded-xl shadow-sm border gap-4">
+                                                <h2 className="text-xl font-bold text-slate-800">Round {activeTournament.currentRound}</h2>
+                                                {!isPublicViewer && (
+                                                    <div className="flex gap-2">
+                                                        <button onClick={() => {setIsEditMode(!isEditMode); setSwapSource(null);}} className={`px-4 py-2 rounded-lg font-semibold border ${isEditMode ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-700'}`}>🛠 Arbiter Edit</button>
+                                                        <button onClick={generatePairings} className="bg-indigo-600 text-white px-5 py-2 rounded-lg font-semibold">Next Round</button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            
+                                            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                                                {matches.filter(m => m.round === activeTournament.currentRound).sort((a, b) => (a.table || 999) - (b.table || 999)).map((match, idx) => (
+                                                    <div key={match.id} className={`p-4 pt-8 rounded-xl shadow-sm border flex flex-col relative ${isEditMode ? 'bg-amber-50 border-amber-300' : 'bg-white border-slate-200'}`}>
+                                                        <div className="absolute top-0 left-1/2 transform -translate-x-1/2 bg-indigo-600 text-white text-[10px] font-bold px-4 py-1 rounded-b-lg">
+                                                            Table {match.table || idx + 1}
+                                                        </div>
+                                                        
+                                                        <div className="flex justify-between items-center mb-4">
+                                                            <div onClick={() => isEditMode ? handleSwapClick(match.id, 'whiteId', match.whiteId) : null} className={`flex flex-col items-center flex-1 ${isEditMode ? 'cursor-pointer hover:bg-amber-200 p-2 rounded' : ''} ${swapSource?.role === 'whiteId' && swapSource?.matchId === match.id ? 'bg-amber-300 rounded' : ''}`}>
+                                                                <div className="w-6 h-6 bg-white border border-slate-400 rounded-full mb-1"></div>
+                                                                <span className="font-semibold text-center text-sm">{getPlayerName(match.whiteId)}</span>
+                                                            </div>
+                                                            <div className="text-xs font-bold text-slate-400 px-2">VS</div>
+                                                            <div onClick={() => isEditMode && match.blackId !== 'BYE' ? handleSwapClick(match.id, 'blackId', match.blackId) : null} className={`flex flex-col items-center flex-1 ${isEditMode && match.blackId !== 'BYE' ? 'cursor-pointer hover:bg-amber-200 p-2 rounded' : ''} ${swapSource?.role === 'blackId' && swapSource?.matchId === match.id ? 'bg-amber-300 rounded' : ''}`}>
+                                                                {match.blackId !== 'BYE' ? (
+                                                                    <>
+                                                                        <div className="w-6 h-6 bg-slate-800 rounded-full mb-1"></div>
+                                                                        <span className="font-semibold text-center text-sm">{getPlayerName(match.blackId)}</span>
+                                                                    </>
+                                                                ) : <span className="font-semibold text-slate-400 italic text-sm">BYE</span>}
+                                                            </div>
+                                                        </div>
+
+                                                        {match.blackId !== 'BYE' && (
+                                                            <div className="flex justify-center gap-1 mt-auto bg-slate-50 p-2 rounded border">
+                                                                {!isPublicViewer && !isEditMode ? (
+                                                                    <>
+                                                                        <button onClick={() => setMatchResult(match.id, '1-0')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '1-0' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>1-0</button>
+                                                                        <button onClick={() => setMatchResult(match.id, '0.5-0.5')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '0.5-0.5' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>½-½</button>
+                                                                        <button onClick={() => setMatchResult(match.id, '0-1')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '0-1' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>0-1</button>
+                                                                    </>
+                                                                ) : (
+                                                                    <div className="font-bold text-indigo-800 text-center w-full py-1.5">{match.result || "Playing"}</div>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
+                            {}
+                            {activeTab === 'results' && (
+                                <div className="space-y-4">
+                                    {activeTournament.currentRound === 0 ? <p className="text-center p-8 bg-white rounded-xl">No matches yet.</p> : (
+                                        <>
+                                            <div className="bg-white p-4 rounded-xl border flex gap-2 overflow-x-auto">
+                                                {Array.from({length: activeTournament.currentRound}).map((_, i) => (
+                                                    <button key={i+1} onClick={() => setSelectedHistoryRound(i+1)} className={`px-4 py-1.5 rounded font-bold ${selectedHistoryRound === i+1 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}>R{i+1}</button>
+                                                ))}
+                                            </div>
+                                            <div className="bg-white rounded-xl border p-4 space-y-2 max-h-[600px] overflow-y-auto">
+                                                {matches.filter(m => m.round === selectedHistoryRound).sort((a, b) => (a.table || 999) - (b.table || 999)).map(match => (
+                                                    <div key={match.id} className="p-3 bg-slate-50 border rounded-lg flex items-center justify-between text-sm">
+                                                        <div className="font-bold text-slate-400 w-10">T.{match.table}</div>
+                                                        <div className="flex-1 text-right font-semibold pr-3">{getPlayerName(match.whiteId)}</div>
+                                                        <div className="px-3 py-1 bg-white border rounded font-bold text-indigo-700 min-w-[3rem] text-center">{match.blackId === 'BYE' ? '1-0' : match.result || '-'}</div>
+                                                        <div className="flex-1 font-semibold pl-3">{match.blackId === 'BYE' ? '(BYE)' : getPlayerName(match.blackId)}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
+                            {}
+                            {activeTab === 'standings' && (
+                                <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
+                                    <div className="p-4 bg-slate-50 border-b flex justify-between items-center">
+                                        <h2 className="font-bold text-slate-800">Live Standings</h2>
+                                        <select value={standingsFilter} onChange={(e) => setStandingsFilter(e.target.value)} className="px-3 py-1 border rounded text-sm bg-white">
+                                            <option value="All">All Categories</option>
+                                            {Array.from(new Set(players.map(p => p.category || 'Open'))).sort().map(cat => (
+                                                <option key={cat} value={cat}>{cat}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    {renderStandingsTable(filteredStandings)}
+                                </div>
+                            )}
+
+                            {!isPublicViewer && activeTab === 'settings' && (
+                                <div className="bg-white rounded-2xl shadow-sm border p-6">
+                                    <h2 className="text-xl font-bold mb-4 text-red-600">Danger Zone</h2>
+                                    <button onClick={() => setIsDeleteModalOpen(true)} className="bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded font-bold transition-colors">Delete Tournament</button>
+                                </div>
+                            )}
+
+                            {isDeleteModalOpen && (
+                                <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4">
+                                    <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl text-center">
+                                        <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">⚠️</div>
+                                        <h2 className="text-xl font-bold mb-2 text-slate-800">Delete Tournament?</h2>
+                                        <p className="text-slate-500 mb-6 text-sm">This action cannot be undone. All players, matches, and standings will be permanently lost.</p>
+                                        <div className="flex justify-center gap-3">
+                                            <button onClick={() => setIsDeleteModalOpen(false)} className="flex-1 px-4 py-2 font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
+                                            <button onClick={async () => {
+                                                await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', activeTournament.id));
+                                                setActiveTournament(null);
+                                                setIsDeleteModalOpen(false);
+                                            }} className="flex-1 px-4 py-2 font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg">Delete</button>
                                         </div>
                                     </div>
-                                ))}
-                            </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 );
-            }
+            };
 
-            if(isPublicViewer && !activeTournament) {
-                return <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-                    <p className="text-slate-500 font-bold text-lg animate-pulse">Loading Tournament Data...</p>
-                </div>;
-            }
-
-            // Tournament View (Admin & Public)
-            return (
-                <div className="min-h-screen bg-slate-50 text-slate-800 font-sans p-4 md:p-8">
-                    <div className="max-w-6xl mx-auto">
-                        <header className="flex flex-col xl:flex-row justify-between items-center mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                            <div className="mb-4 xl:mb-0 text-center xl:text-left flex flex-col items-start">
-                                {!isPublicViewer && (
-                                    <button onClick={() => setActiveTournament(null)} className="text-sm text-slate-500 hover:text-indigo-600 mb-2 font-semibold">← Dashboard</button>
-                                )}
-                                <h1 className="text-2xl md:text-3xl font-extrabold text-indigo-900 tracking-tight">{activeTournament.name}</h1>
-                                {isPublicViewer && <span className="bg-indigo-100 text-indigo-800 text-xs font-bold px-2 py-1 rounded mt-2">Public Viewer Mode</span>}
-                            </div>
-                            
-                            <div className="flex gap-2 bg-slate-100 p-1 rounded-lg flex-wrap justify-center">
-                                {!isPublicViewer && <button onClick={() => setActiveTab('setup')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'setup' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Players</button>}
-                                <button onClick={() => setActiveTab('standings')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'standings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Live Standings</button>
-                                <button onClick={() => setActiveTab('matches')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'matches' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Round {activeTournament.currentRound > 0 ? activeTournament.currentRound : ''}</button>
-                                <button onClick={() => setActiveTab('results')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'results' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>History</button>
-                                {!isPublicViewer && <button onClick={() => setActiveTab('settings')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'settings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Settings</button>}
-                            </div>
-                        </header>
-
-                        {/* PLAYERS TAB (ADMIN ONLY) */}
-                        {!isPublicViewer && activeTab === 'setup' && (
-                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                                <div className="p-6 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
-                                    <h2 className="text-xl font-bold text-slate-800">Tournament Roster</h2>
-                                    {activeTournament.currentRound === 0 && (
-                                        <button onClick={generatePairings} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold shadow-sm">Start Round 1</button>
-                                    )}
-                                </div>
-                                <div className="p-6">
-                                    {activeTournament.currentRound === 0 && (
-                                        <form onSubmit={addPlayer} className="flex flex-col md:flex-row gap-3 mb-8">
-                                            <input type="text" placeholder="Name" value={newPlayerName} onChange={(e) => setNewPlayerName(e.target.value)} className="flex-1 px-4 py-2 border rounded-lg focus:ring-2" />
-                                            <input type="number" placeholder="Rating" value={newPlayerRating} onChange={(e) => setNewPlayerRating(e.target.value)} className="w-32 px-4 py-2 border rounded-lg focus:ring-2" />
-                                            <select value={newPlayerCategory} onChange={(e) => setNewPlayerCategory(e.target.value)} className="px-4 py-2 border rounded-lg focus:ring-2 bg-white">
-                                                {TOURNAMENT_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
-                                            </select>
-                                            <button type="submit" className="bg-emerald-500 text-white px-6 py-2 rounded-lg font-semibold">Add</button>
-                                        </form>
-                                    )}
-                                    <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-2">
-                                        {players.map((p, i) => (
-                                            <div key={p.id} className="p-3 bg-slate-50 border border-slate-200 rounded flex justify-between items-center">
-                                                <div><span className="font-bold">{i+1}. {p.name}</span> <span className="text-xs text-slate-500">({p.rating})</span></div>
-                                                {activeTournament.currentRound === 0 && <button onClick={() => removePlayer(p.id)} className="text-red-500 text-sm font-bold">X</button>}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* MATCHES TAB */}
-                        {activeTab === 'matches' && (
-                            <div className="space-y-6">
-                                {activeTournament.currentRound === 0 ? (
-                                    <div className="text-center py-12 bg-white rounded-2xl shadow-sm border border-slate-200">
-                                        <p className="text-slate-500 mb-4">Tournament hasn't started yet.</p>
-                                        {!isPublicViewer && <button onClick={generatePairings} className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold">Generate Round 1</button>}
-                                    </div>
-                                ) : (
-                                    <>
-                                        <div className="flex flex-col md:flex-row justify-between items-center bg-white p-5 rounded-xl shadow-sm border gap-4">
-                                            <h2 className="text-xl font-bold text-slate-800">Round {activeTournament.currentRound}</h2>
-                                            {!isPublicViewer && (
-                                                <div className="flex gap-2">
-                                                    <button onClick={() => {setIsEditMode(!isEditMode); setSwapSource(null);}} className={`px-4 py-2 rounded-lg font-semibold border ${isEditMode ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-700'}`}>🛠 Arbiter Edit</button>
-                                                    <button onClick={generatePairings} className="bg-indigo-600 text-white px-5 py-2 rounded-lg font-semibold">Next Round</button>
-                                                </div>
-                                            )}
-                                        </div>
-                                        
-                                        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                                            {matches.filter(m => m.round === activeTournament.currentRound).sort((a, b) => (a.table || 999) - (b.table || 999)).map((match, idx) => (
-                                                <div key={match.id} className={`p-4 pt-8 rounded-xl shadow-sm border flex flex-col relative ${isEditMode ? 'bg-amber-50 border-amber-300' : 'bg-white border-slate-200'}`}>
-                                                    <div className="absolute top-0 left-1/2 transform -translate-x-1/2 bg-indigo-600 text-white text-[10px] font-bold px-4 py-1 rounded-b-lg">
-                                                        Table {match.table || idx + 1}
-                                                    </div>
-                                                    
-                                                    <div className="flex justify-between items-center mb-4">
-                                                        <div onClick={() => isEditMode ? handleSwapClick(match.id, 'whiteId', match.whiteId) : null} className={`flex flex-col items-center flex-1 ${isEditMode ? 'cursor-pointer hover:bg-amber-200 p-2 rounded' : ''} ${swapSource?.role === 'whiteId' && swapSource?.matchId === match.id ? 'bg-amber-300 rounded' : ''}`}>
-                                                            <div className="w-6 h-6 bg-white border border-slate-400 rounded-full mb-1"></div>
-                                                            <span className="font-semibold text-center text-sm">{getPlayerName(match.whiteId)}</span>
-                                                        </div>
-                                                        <div className="text-xs font-bold text-slate-400 px-2">VS</div>
-                                                        <div onClick={() => isEditMode && match.blackId !== 'BYE' ? handleSwapClick(match.id, 'blackId', match.blackId) : null} className={`flex flex-col items-center flex-1 ${isEditMode && match.blackId !== 'BYE' ? 'cursor-pointer hover:bg-amber-200 p-2 rounded' : ''} ${swapSource?.role === 'blackId' && swapSource?.matchId === match.id ? 'bg-amber-300 rounded' : ''}`}>
-                                                            {match.blackId !== 'BYE' ? (
-                                                                <>
-                                                                    <div className="w-6 h-6 bg-slate-800 rounded-full mb-1"></div>
-                                                                    <span className="font-semibold text-center text-sm">{getPlayerName(match.blackId)}</span>
-                                                                </>
-                                                            ) : <span className="font-semibold text-slate-400 italic text-sm">BYE</span>}
-                                                        </div>
-                                                    </div>
-
-                                                    {match.blackId !== 'BYE' && (
-                                                        <div className="flex justify-center gap-1 mt-auto bg-slate-50 p-2 rounded border">
-                                                            {!isPublicViewer && !isEditMode ? (
-                                                                <>
-                                                                    <button onClick={() => setMatchResult(match.id, '1-0')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '1-0' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>1-0</button>
-                                                                    <button onClick={() => setMatchResult(match.id, '0.5-0.5')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '0.5-0.5' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>½-½</button>
-                                                                    <button onClick={() => setMatchResult(match.id, '0-1')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '0-1' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>0-1</button>
-                                                                </>
-                                                            ) : (
-                                                                <div className="font-bold text-indigo-800 text-center w-full py-1.5">{match.result || "Playing"}</div>
-                                                            )}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        )}
-
-                        {/* RESULTS TAB */}
-                        {activeTab === 'results' && (
-                            <div className="space-y-4">
-                                {activeTournament.currentRound === 0 ? <p className="text-center p-8 bg-white rounded-xl">No matches yet.</p> : (
-                                    <>
-                                        <div className="bg-white p-4 rounded-xl border flex gap-2 overflow-x-auto">
-                                            {Array.from({length: activeTournament.currentRound}).map((_, i) => (
-                                                <button key={i+1} onClick={() => setSelectedHistoryRound(i+1)} className={`px-4 py-1.5 rounded font-bold ${selectedHistoryRound === i+1 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}>R{i+1}</button>
-                                            ))}
-                                        </div>
-                                        <div className="bg-white rounded-xl border p-4 space-y-2 max-h-[600px] overflow-y-auto">
-                                            {matches.filter(m => m.round === selectedHistoryRound).sort((a, b) => (a.table || 999) - (b.table || 999)).map(match => (
-                                                <div key={match.id} className="p-3 bg-slate-50 border rounded-lg flex items-center justify-between text-sm">
-                                                    <div className="font-bold text-slate-400 w-10">T.{match.table}</div>
-                                                    <div className="flex-1 text-right font-semibold pr-3">{getPlayerName(match.whiteId)}</div>
-                                                    <div className="px-3 py-1 bg-white border rounded font-bold text-indigo-700 min-w-[3rem] text-center">{match.blackId === 'BYE' ? '1-0' : match.result || '-'}</div>
-                                                    <div className="flex-1 font-semibold pl-3">{match.blackId === 'BYE' ? '(BYE)' : getPlayerName(match.blackId)}</div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        )}
-
-                        {/* STANDINGS TAB */}
-                        {activeTab === 'standings' && (
-                            <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
-                                <div className="p-4 bg-slate-50 border-b flex justify-between items-center">
-                                    <h2 className="font-bold text-slate-800">Live Standings</h2>
-                                    <select value={standingsFilter} onChange={(e) => setStandingsFilter(e.target.value)} className="px-3 py-1 border rounded text-sm bg-white">
-                                        <option value="All">All Categories</option>
-                                        {Array.from(new Set(players.map(p => p.category || 'Open'))).sort().map(cat => (
-                                            <option key={cat} value={cat}>{cat}</option>
-                                        ))}
-                                    </select>
-                                </div>
-                                {renderStandingsTable(filteredStandings)}
-                            </div>
-                        )}
-
-                        {/* SETTINGS TAB (ADMIN) */}
-                        {!isPublicViewer && activeTab === 'settings' && (
-                            <div className="bg-white rounded-2xl shadow-sm border p-6">
-                                <h2 className="text-xl font-bold mb-4 text-red-600">Danger Zone</h2>
-                                <button onClick={() => setIsDeleteModalOpen(true)} className="bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded font-bold transition-colors">Delete Tournament</button>
-                            </div>
-                        )}
-
-                        {/* Delete Confirmation Modal */}
-                        {isDeleteModalOpen && (
-                            <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4">
-                                <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl text-center">
-                                    <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">⚠️</div>
-                                    <h2 className="text-xl font-bold mb-2 text-slate-800">Delete Tournament?</h2>
-                                    <p className="text-slate-500 mb-6 text-sm">This action cannot be undone. All players, matches, and standings will be permanently lost.</p>
-                                    <div className="flex justify-center gap-3">
-                                        <button onClick={() => setIsDeleteModalOpen(false)} className="flex-1 px-4 py-2 font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
-                                        <button onClick={async () => {
-                                            await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', activeTournament.id));
-                                            setActiveTournament(null);
-                                            setIsDeleteModalOpen(false);
-                                        }} className="flex-1 px-4 py-2 font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg">Delete</button>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            );
+            const root = ReactDOM.createRoot(document.getElementById('root'));
+            root.render(<ChessTournamentApp />);
         };
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<ChessTournamentApp />);
+        if (window.FirebaseModules) {
+            // If Firebase loaded incredibly fast
+            startApp();
+        } else {
+            // Wait for the broadcast event from the module script above
+            window.addEventListener('firebase-modules-ready', startApp);
+        }
     </script>
 </body>
 </html>
