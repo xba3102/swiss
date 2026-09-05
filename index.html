@@ -64,6 +64,11 @@
             const [errorMessage, setErrorMessage] = useState('');
             const [copySuccess, setCopySuccess] = useState('');
 
+            // Modal States (To replace blocked prompt/confirm)
+            const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+            const [newTournamentName, setNewTournamentName] = useState('');
+            const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+
             // Form States
             const [newPlayerCategory, setNewPlayerCategory] = useState('Open');
             const [standingsFilter, setStandingsFilter] = useState('All');
@@ -83,13 +88,8 @@
                 { id: 'wins', code: 'Wins', name: 'Most Wins', enabled: true }
             ];
 
-            // 1. Initialize Auth or Viewer Mode
+            // 1. Initialize Auth
             useEffect(() => {
-                if (isPublicViewer) {
-                    // Skip Auth if sharing link is used
-                    return;
-                }
-
                 const initAuth = async () => {
                     if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                         await signInWithCustomToken(auth, __initial_auth_token);
@@ -100,19 +100,17 @@
                 initAuth();
 
                 const unsubscribe = onAuthStateChanged(auth, (authUser) => {
-                    if (authUser && !authUser.isAnonymous) {
-                        setUser(authUser);
-                    } else {
-                        setUser(null);
-                        setActiveTournament(null);
-                    }
+                    setUser(authUser);
+                    if (!authUser) setActiveTournament(null);
                 });
                 return () => unsubscribe();
-            }, [isPublicViewer]);
+            }, []);
 
             // 2. Fetch Data (Admin or Viewer)
             useEffect(() => {
-                const targetUserId = isPublicViewer ? publicUserId : (user ? user.uid : null);
+                if (!user) return; // Guard: Wait for auth initialization
+                
+                const targetUserId = isPublicViewer ? publicUserId : user.uid;
                 if (!targetUserId) return;
 
                 const unsubTourneys = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'tournaments'), (snap) => {
@@ -166,13 +164,19 @@
                 setTimeout(() => setCopySuccess(''), 3000);
             };
 
-            const createNewTournament = async () => {
+            const openCreateModal = () => {
+                setNewTournamentName('');
+                setIsCreateModalOpen(true);
+            };
+
+            const createNewTournament = async (e) => {
+                e.preventDefault();
                 if (!user) return;
-                const name = prompt("Enter Tournament Name (e.g. 'School Open 2026'):");
+                const name = newTournamentName.trim();
                 if (!name) return;
                 const newTourney = {
                     id: Date.now().toString(),
-                    name: name.trim(),
+                    name: name,
                     createdAt: new Date().toISOString(),
                     currentRound: 0,
                     isTeamMode: false,
@@ -180,6 +184,7 @@
                     tieBreakOrder: DEFAULT_TIE_BREAKS
                 };
                 await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', newTourney.id), newTourney);
+                setIsCreateModalOpen(false);
             };
 
             const updateTournamentSettings = async (updates) => {
@@ -457,8 +462,11 @@
                 );
             };
 
-            // Login Screen (Only if not viewer and not logged in)
-            if (!user && !isPublicViewer) {
+            const isAnonymousUser = user && user.isAnonymous;
+            const isLoggedInAdmin = user && !user.isAnonymous;
+
+            // Login Screen (Only if not viewer and not logged in as admin)
+            if (!isLoggedInAdmin && !isPublicViewer) {
                 return (
                     <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
                         <div className="max-w-md w-full bg-white p-8 rounded-2xl shadow-lg border border-slate-200 text-center">
@@ -485,7 +493,7 @@
             }
 
             // Dashboard (Admin only)
-            if (user && !activeTournament && !isPublicViewer) {
+            if (isLoggedInAdmin && !activeTournament && !isPublicViewer) {
                 return (
                     <div className="min-h-screen bg-slate-50 p-4 md:p-8">
                         <div className="max-w-4xl mx-auto">
@@ -495,10 +503,33 @@
                                     <p className="text-sm text-slate-500 mt-1">Logged in as {user.email}</p>
                                 </div>
                                 <div className="flex gap-3">
-                                    <button onClick={createNewTournament} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-5 rounded-lg transition-all shadow-sm">+ New</button>
+                                    <button onClick={openCreateModal} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-5 rounded-lg transition-all shadow-sm">+ New</button>
                                     <button onClick={() => signOut(auth)} className="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded-lg transition-all">Logout</button>
                                 </div>
                             </header>
+
+                            {/* Create Tournament Modal */}
+                            {isCreateModalOpen && (
+                                <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4">
+                                    <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+                                        <h2 className="text-xl font-bold mb-4">Create New Tournament</h2>
+                                        <form onSubmit={createNewTournament}>
+                                            <input 
+                                                type="text" 
+                                                autoFocus
+                                                placeholder="Enter Tournament Name (e.g. 'School Open 2026')" 
+                                                value={newTournamentName}
+                                                onChange={(e) => setNewTournamentName(e.target.value)}
+                                                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none mb-6"
+                                            />
+                                            <div className="flex justify-end gap-3">
+                                                <button type="button" onClick={() => setIsCreateModalOpen(false)} className="px-4 py-2 font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
+                                                <button type="submit" className="px-4 py-2 font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg">Create</button>
+                                            </div>
+                                        </form>
+                                    </div>
+                                </div>
+                            )}
 
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 {tournaments.map(t => (
@@ -690,13 +721,27 @@
                         {/* SETTINGS TAB (ADMIN) */}
                         {!isPublicViewer && activeTab === 'settings' && (
                             <div className="bg-white rounded-2xl shadow-sm border p-6">
-                                <h2 className="text-xl font-bold mb-4">Danger Zone</h2>
-                                <button onClick={async () => {
-                                    if(confirm("Permanently delete this tournament?")) {
-                                        await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', activeTournament.id));
-                                        setActiveTournament(null);
-                                    }
-                                }} className="bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded font-bold">Delete Tournament</button>
+                                <h2 className="text-xl font-bold mb-4 text-red-600">Danger Zone</h2>
+                                <button onClick={() => setIsDeleteModalOpen(true)} className="bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded font-bold transition-colors">Delete Tournament</button>
+                            </div>
+                        )}
+
+                        {/* Delete Confirmation Modal */}
+                        {isDeleteModalOpen && (
+                            <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4">
+                                <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl text-center">
+                                    <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">⚠️</div>
+                                    <h2 className="text-xl font-bold mb-2 text-slate-800">Delete Tournament?</h2>
+                                    <p className="text-slate-500 mb-6 text-sm">This action cannot be undone. All players, matches, and standings will be permanently lost.</p>
+                                    <div className="flex justify-center gap-3">
+                                        <button onClick={() => setIsDeleteModalOpen(false)} className="flex-1 px-4 py-2 font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
+                                        <button onClick={async () => {
+                                            await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', activeTournament.id));
+                                            setActiveTournament(null);
+                                            setIsDeleteModalOpen(false);
+                                        }} className="flex-1 px-4 py-2 font-bold text-white bg-red-600 hover:bg-red-700 rounded-lg">Delete</button>
+                                    </div>
+                                </div>
                             </div>
                         )}
                     </div>
