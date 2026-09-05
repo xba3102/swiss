@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Swiss Chess Manager</title>
+    <title>Swiss Chess Manager Cloud</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -12,174 +12,228 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     
-    <!-- Babel for in-browser JSX compilation -->
+    <!-- Babel -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        window.FirebaseApp = { initializeApp };
+        window.FirebaseAuth = { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut };
+        window.FirebaseFirestore = { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection };
+    </script>
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans antialiased">
     <div id="root"></div>
 
     <script type="text/babel">
+        const { initializeApp } = window.FirebaseApp;
+        const { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } = window.FirebaseAuth;
+        const { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } = window.FirebaseFirestore;
+
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
         const { useState, useMemo, useEffect } = React;
 
-        // Custom hook to sync state with LocalStorage for offline persistence
-        function useLocalStorage(key, initialValue) {
-            const [storedValue, setStoredValue] = useState(() => {
-                try {
-                    const item = window.localStorage.getItem(key);
-                    return item ? JSON.parse(item) : initialValue;
-                } catch (error) {
-                    console.error(error);
-                    return initialValue;
-                }
-            });
-
-            useEffect(() => {
-                try {
-                    window.localStorage.setItem(key, JSON.stringify(storedValue));
-                } catch (error) {
-                    console.error(error);
-                }
-            }, [key, storedValue]);
-
-            return [storedValue, setStoredValue];
-        }
-
         const ChessTournamentApp = () => {
-            const [players, setPlayers] = useLocalStorage('chess_players', []);
-            const [matches, setMatches] = useLocalStorage('chess_matches', []);
-            const [currentRound, setCurrentRound] = useLocalStorage('chess_round', 0);
+            // URL Parameters for Public Viewer Mode
+            const urlParams = new URLSearchParams(window.location.search);
+            const publicUserId = urlParams.get('u');
+            const publicTourneyId = urlParams.get('t');
+            const isPublicViewer = !!(publicUserId && publicTourneyId);
+
+            const [user, setUser] = useState(null);
             
-            const [isTeamMode, setIsTeamMode] = useLocalStorage('chess_team_mode', false);
-            const [boardsPerTeam, setBoardsPerTeam] = useLocalStorage('chess_boards', 5);
+            // Database State
+            const [tournaments, setTournaments] = useState([]);
+            const [allPlayers, setAllPlayers] = useState([]);
+            const [allMatches, setAllMatches] = useState([]);
             
-            const [tieBreakOrder, setTieBreakOrder] = useLocalStorage('chess_tb_order', [
+            // UI State
+            const [activeTournament, setActiveTournament] = useState(null);
+            const [activeTab, setActiveTab] = useState(isPublicViewer ? 'standings' : 'setup');
+            const [selectedHistoryRound, setSelectedHistoryRound] = useState(1);
+            const [isEditMode, setIsEditMode] = useState(false);
+            const [swapSource, setSwapSource] = useState(null);
+            const [errorMessage, setErrorMessage] = useState('');
+            const [copySuccess, setCopySuccess] = useState('');
+
+            // Form States
+            const [newPlayerCategory, setNewPlayerCategory] = useState('Open');
+            const [standingsFilter, setStandingsFilter] = useState('All');
+            const [newPlayerName, setNewPlayerName] = useState('');
+            const [newPlayerRating, setNewPlayerRating] = useState('1500');
+
+            const TOURNAMENT_CATEGORIES = [
+                'Open', 'Under 9 Boys', 'Under 9 Girls', 'Under 12 Boys', 'Under 12 Girls', 
+                'Under 15 Boys', 'Under 15 Girls', 'Under 18 Boys', 'Under 18 Girls', 'Veteran'
+            ];
+
+            const DEFAULT_TIE_BREAKS = [
                 { id: 'de', code: 'DE', name: 'Direct Encounter', enabled: true },
                 { id: 'bhc1', code: 'BHC1', name: 'Buchholz Cut 1', enabled: true },
                 { id: 'bh', code: 'BH', name: 'Buchholz', enabled: true },
                 { id: 'sb', code: 'SB', name: 'Sonneborn-Berger', enabled: true },
                 { id: 'wins', code: 'Wins', name: 'Most Wins', enabled: true }
-            ]);
-
-            const [activeTab, setActiveTab] = useState('setup');
-            const [selectedHistoryRound, setSelectedHistoryRound] = useState(1);
-            
-            const TOURNAMENT_CATEGORIES = [
-                'Open', 
-                'Under 9 Boys', 'Under 9 Girls', 
-                'Under 12 Boys', 'Under 12 Girls', 
-                'Under 15 Boys', 'Under 15 Girls', 
-                'Under 18 Boys', 'Under 18 Girls', 
-                'Veteran'
             ];
-            
-            const [newPlayerCategory, setNewPlayerCategory] = useState('Open');
-            const [standingsFilter, setStandingsFilter] = useState('All');
-            const [newPlayerName, setNewPlayerName] = useState('');
-            const [newPlayerRating, setNewPlayerRating] = useState('1500');
-            const [errorMessage, setErrorMessage] = useState('');
 
-            const addPlayer = (e) => {
-                e.preventDefault();
-                if (!newPlayerName.trim()) {
-                    setErrorMessage("Player name is required.");
+            // 1. Initialize Auth or Viewer Mode
+            useEffect(() => {
+                if (isPublicViewer) {
+                    // Skip Auth if sharing link is used
                     return;
                 }
+
+                const initAuth = async () => {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                };
+                initAuth();
+
+                const unsubscribe = onAuthStateChanged(auth, (authUser) => {
+                    if (authUser && !authUser.isAnonymous) {
+                        setUser(authUser);
+                    } else {
+                        setUser(null);
+                        setActiveTournament(null);
+                    }
+                });
+                return () => unsubscribe();
+            }, [isPublicViewer]);
+
+            // 2. Fetch Data (Admin or Viewer)
+            useEffect(() => {
+                const targetUserId = isPublicViewer ? publicUserId : (user ? user.uid : null);
+                if (!targetUserId) return;
+
+                const unsubTourneys = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'tournaments'), (snap) => {
+                    const tList = snap.docs.map(d => d.data());
+                    setTournaments(tList);
+                    if (isPublicViewer) {
+                        const t = tList.find(x => x.id === publicTourneyId);
+                        if (t) {
+                            setActiveTournament(t);
+                            if (t.currentRound > 0 && activeTab === 'setup') setActiveTab('standings');
+                        } else {
+                            setErrorMessage("Tournament not found or link is invalid.");
+                        }
+                    }
+                }, (error) => console.error("Error fetching tournaments:", error));
+
+                const unsubPlayers = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'players'), (snap) => {
+                    setAllPlayers(snap.docs.map(d => d.data()));
+                }, (error) => console.error("Error fetching players:", error));
+
+                const unsubMatches = onSnapshot(collection(db, 'artifacts', appId, 'users', targetUserId, 'matches'), (snap) => {
+                    setAllMatches(snap.docs.map(d => d.data()));
+                }, (error) => console.error("Error fetching matches:", error));
+
+                return () => {
+                    unsubTourneys();
+                    unsubPlayers();
+                    unsubMatches();
+                };
+            }, [user, isPublicViewer, publicUserId, publicTourneyId]);
+
+            const players = useMemo(() => allPlayers.filter(p => p.tournamentId === activeTournament?.id), [allPlayers, activeTournament]);
+            const matches = useMemo(() => allMatches.filter(m => m.tournamentId === activeTournament?.id), [allMatches, activeTournament]);
+
+            const handleLogin = async () => {
+                try {
+                    setErrorMessage('');
+                    await signInWithPopup(auth, new GoogleAuthProvider());
+                } catch (e) {
+                    setErrorMessage("Login failed. Ensure pop-ups are allowed.");
+                }
+            };
+
+            const copyShareLink = (tId) => {
+                if(!user) return;
+                const url = new URL(window.location.href);
+                url.searchParams.set('u', user.uid);
+                url.searchParams.set('t', tId);
+                navigator.clipboard.writeText(url.toString());
+                setCopySuccess(tId);
+                setTimeout(() => setCopySuccess(''), 3000);
+            };
+
+            const createNewTournament = async () => {
+                if (!user) return;
+                const name = prompt("Enter Tournament Name (e.g. 'School Open 2026'):");
+                if (!name) return;
+                const newTourney = {
+                    id: Date.now().toString(),
+                    name: name.trim(),
+                    createdAt: new Date().toISOString(),
+                    currentRound: 0,
+                    isTeamMode: false,
+                    boardsPerTeam: 5,
+                    tieBreakOrder: DEFAULT_TIE_BREAKS
+                };
+                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', newTourney.id), newTourney);
+            };
+
+            const updateTournamentSettings = async (updates) => {
+                if (!user || !activeTournament || isPublicViewer) return;
+                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', activeTournament.id), updates, { merge: true });
+                setActiveTournament({ ...activeTournament, ...updates });
+            };
+
+            const addPlayer = async (e) => {
+                e.preventDefault();
+                if (!user || !activeTournament || isPublicViewer) return;
+                if (!newPlayerName.trim()) { setErrorMessage("Player name is required."); return; }
                 const newPlayer = {
                     id: Date.now().toString(),
+                    tournamentId: activeTournament.id,
                     name: newPlayerName.trim(),
                     rating: parseInt(newPlayerRating) || 1500,
                     category: newPlayerCategory,
-                    colorHistory: [] // Tracks 'W' or 'B' per round
+                    colorHistory: [] 
                 };
-                
-                setPlayers([...players, newPlayer]);
+                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', newPlayer.id), newPlayer);
                 setNewPlayerName('');
-                setErrorMessage('');
             };
 
-            const removePlayer = (id) => {
-                setPlayers(players.filter(p => p.id !== id));
-            };
-
-            const moveTieBreak = (index, direction) => {
-                if (direction === -1 && index === 0) return;
-                if (direction === 1 && index === tieBreakOrder.length - 1) return;
-                const newOrder = [...tieBreakOrder];
-                const temp = newOrder[index];
-                newOrder[index] = newOrder[index + direction];
-                newOrder[index + direction] = temp;
-                setTieBreakOrder(newOrder);
-            };
-
-            const toggleTieBreak = (index) => {
-                const newOrder = [...tieBreakOrder];
-                newOrder[index].enabled = !newOrder[index].enabled;
-                setTieBreakOrder(newOrder);
-            };
-
-            const resetTournament = () => {
-                if(window.confirm("Are you sure you want to clear all data? This cannot be undone.")) {
-                    setPlayers([]);
-                    setMatches([]);
-                    setCurrentRound(0);
-                    setActiveTab('setup');
-                }
+            const removePlayer = async (id) => {
+                if (!user || isPublicViewer) return;
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', id));
             };
 
             const computeStandings = (playerList, matchHistory, tbOrder, teamMode, boards) => {
                 if (playerList.length === 0) return [];
-
                 const stats = {};
                 playerList.forEach(p => {
-                    stats[p.id] = { 
-                        ...p, 
-                        score: 0, 
-                        matchPoints: 0,
-                        gamePoints: 0,
-                        wins: 0, 
-                        opponents: [], 
-                        results: {}, 
-                    };
+                    stats[p.id] = { ...p, score: 0, matchPoints: 0, gamePoints: 0, wins: 0, opponents: [], results: {}, };
                 });
 
                 matchHistory.filter(m => m.result).forEach(match => {
                     const isBye = match.blackId === 'BYE';
-                    
                     if (isBye) {
                         if (stats[match.whiteId]) {
-                            stats[match.whiteId].matchPoints += 2;
-                            stats[match.whiteId].gamePoints += (teamMode ? boards : 1);
-                            stats[match.whiteId].score += (teamMode ? 2 : 1);
-                            stats[match.whiteId].wins += 1;
+                            stats[match.whiteId].matchPoints += 2; stats[match.whiteId].gamePoints += (teamMode ? boards : 1);
+                            stats[match.whiteId].score += (teamMode ? 2 : 1); stats[match.whiteId].wins += 1;
                         }
                     } else {
-                        const white = stats[match.whiteId];
-                        const black = stats[match.blackId];
-                        
+                        const white = stats[match.whiteId]; const black = stats[match.blackId];
                         if (white && black) {
-                            white.opponents.push(match.blackId);
-                            black.opponents.push(match.whiteId);
-
+                            white.opponents.push(match.blackId); black.opponents.push(match.whiteId);
                             const [wScoreStr, bScoreStr] = match.result.split('-');
-                            const wScore = parseFloat(wScoreStr);
-                            const bScore = parseFloat(bScoreStr);
+                            const wScore = parseFloat(wScoreStr); const bScore = parseFloat(bScoreStr);
+                            white.gamePoints += wScore; black.gamePoints += bScore;
 
-                            white.gamePoints += wScore;
-                            black.gamePoints += bScore;
-
-                            if (wScore > bScore) {
-                                white.matchPoints += 2; white.wins += 1;
-                                white.results[match.blackId] = wScore;
-                                black.results[match.whiteId] = bScore;
-                            } else if (wScore < bScore) {
-                                black.matchPoints += 2; black.wins += 1;
-                                black.results[match.whiteId] = bScore;
-                                white.results[match.blackId] = wScore;
-                            } else {
-                                white.matchPoints += 1; black.matchPoints += 1;
-                                white.results[match.blackId] = wScore;
-                                black.results[match.whiteId] = bScore;
-                            }
+                            if (wScore > bScore) { white.matchPoints += 2; white.wins += 1; white.results[match.blackId] = wScore; black.results[match.whiteId] = bScore; } 
+                            else if (wScore < bScore) { black.matchPoints += 2; black.wins += 1; black.results[match.whiteId] = bScore; white.results[match.blackId] = wScore; } 
+                            else { white.matchPoints += 1; black.matchPoints += 1; white.results[match.blackId] = wScore; black.results[match.whiteId] = bScore; }
 
                             white.score = teamMode ? white.matchPoints : white.gamePoints;
                             black.score = teamMode ? black.matchPoints : black.gamePoints;
@@ -189,55 +243,22 @@
 
                 Object.values(stats).forEach(player => {
                     let opponentScores = player.opponents.map(oppId => stats[oppId] ? stats[oppId].score : 0);
-                    
                     player.tb_bh = opponentScores.reduce((a, b) => a + b, 0);
-                    
                     if (opponentScores.length > 0) {
                         const minScore = Math.min(...opponentScores);
                         player.tb_bhc1 = player.tb_bh - minScore;
-                    } else {
-                        player.tb_bhc1 = 0;
-                    }
-
+                    } else { player.tb_bhc1 = 0; }
                     player.tb_sb = player.opponents.reduce((total, oppId) => {
                         const oppScore = stats[oppId] ? stats[oppId].score : 0;
                         const resAgainstOpp = player.results[oppId] || 0;
                         return total + (oppScore * resAgainstOpp);
                     }, 0);
-
                     player.tb_wins = player.wins;
-                });
-
-                const scoreGroups = {};
-                Object.values(stats).forEach(p => {
-                    if (!scoreGroups[p.score]) scoreGroups[p.score] = [];
-                    scoreGroups[p.score].push(p.id);
-                });
-
-                Object.values(scoreGroups).forEach(group => {
-                    if (group.length > 1) {
-                        group.forEach(p1 => {
-                            let dePts = 0;
-                            group.forEach(p2 => {
-                                if (p1 !== p2 && stats[p1].results[p2] !== undefined) {
-                                    let headToHeadGamePoints = stats[p1].results[p2];
-                                    let opponentGamePoints = stats[p2].results[p1];
-                                    if (headToHeadGamePoints > opponentGamePoints) dePts += 2;
-                                    else if (headToHeadGamePoints === opponentGamePoints) dePts += 1;
-                                    else if (!teamMode) dePts += headToHeadGamePoints;
-                                }
-                            });
-                            stats[p1].tb_de = dePts;
-                        });
-                    } else {
-                        stats[group[0]].tb_de = 0;
-                    }
                 });
 
                 return Object.values(stats).sort((a, b) => {
                     if (b.score !== a.score) return b.score - a.score;
                     if (teamMode && b.gamePoints !== a.gamePoints) return b.gamePoints - a.gamePoints;
-                    
                     const activeTBs = tbOrder.filter(tb => tb.enabled);
                     for (const tb of activeTBs) {
                         const valB = b[`tb_${tb.id}`] || 0;
@@ -249,40 +270,41 @@
             };
 
             const standings = useMemo(() => {
-                return computeStandings(players, matches, tieBreakOrder, isTeamMode, boardsPerTeam);
-            }, [players, matches, tieBreakOrder, isTeamMode, boardsPerTeam]);
+                if(!activeTournament) return [];
+                return computeStandings(players, matches, activeTournament.tieBreakOrder, activeTournament.isTeamMode, activeTournament.boardsPerTeam);
+            }, [players, matches, activeTournament]);
 
             const historicalStandings = useMemo(() => {
+                if(!activeTournament) return [];
                 const pastMatches = matches.filter(m => m.round <= selectedHistoryRound);
-                return computeStandings(players, pastMatches, tieBreakOrder, isTeamMode, boardsPerTeam);
-            }, [players, matches, selectedHistoryRound, tieBreakOrder, isTeamMode, boardsPerTeam]);
+                return computeStandings(players, pastMatches, activeTournament.tieBreakOrder, activeTournament.isTeamMode, activeTournament.boardsPerTeam);
+            }, [players, matches, selectedHistoryRound, activeTournament]);
 
-            // Helper function to evaluate FIDE color preference
-            // Returns 'W' if player needs White, 'B' if player needs Black, or null if neutral
+            const filteredStandings = useMemo(() => {
+                if (standingsFilter === 'All') return standings;
+                return standings.filter(p => (p.category || 'Open') === standingsFilter);
+            }, [standings, standingsFilter]);
+
+            // COLOR PREFERENCE LOGIC
             const getColorPreference = (player) => {
                 const history = player.colorHistory || [];
                 if (history.length === 0) return null;
-                
                 let wCount = history.filter(c => c === 'W').length;
                 let bCount = history.filter(c => c === 'B').length;
-
-                // Absolute restriction: Cannot have same color 3 times in a row
                 const lastTwo = history.slice(-2);
                 if (lastTwo.length === 2 && lastTwo[0] === lastTwo[1]) {
-                    return lastTwo[0] === 'W' ? 'B' : 'W';
+                    return lastTwo[0] === 'W' ? 'B' : 'W'; // Force alternate if 2 in a row
                 }
-
                 if (wCount > bCount) return 'B';
                 if (bCount > wCount) return 'W';
-                return null;
+                return null; // Equal balance
             };
 
-            const generatePairings = () => {
-                if (players.length < 2) {
-                    setErrorMessage("Need at least 2 players to start.");
-                    return;
-                }
+            const generatePairings = async () => {
+                if (!user || !activeTournament || isPublicViewer) return;
+                if (players.length < 2) { setErrorMessage("Need at least 2 players to start."); return; }
 
+                const currentRound = activeTournament.currentRound;
                 const currentMatches = matches.filter(m => m.round === currentRound);
                 if (currentRound > 0 && currentMatches.some(m => m.result === null)) {
                     setErrorMessage("Please enter all results for the current round before advancing.");
@@ -298,10 +320,7 @@
                 let tableCounter = 1;
 
                 const hasPlayed = (id1, id2) => {
-                    return matches.some(m => 
-                        (m.whiteId === id1 && m.blackId === id2) || 
-                        (m.whiteId === id2 && m.blackId === id1)
-                    );
+                    return matches.some(m => (m.whiteId === id1 && m.blackId === id2) || (m.whiteId === id2 && m.blackId === id1));
                 };
 
                 for (let i = 0; i < toPair.length; i++) {
@@ -312,423 +331,311 @@
                     for (let j = i + 1; j < toPair.length; j++) {
                         let candidate = toPair[j];
                         if (!paired.has(candidate) && !hasPlayed(p1Id, candidate)) {
-                            p2Id = candidate;
-                            break;
+                            p2Id = candidate; break;
                         }
                     }
 
                     if (!p2Id) {
                         for (let j = i + 1; j < toPair.length; j++) {
                             let candidate = toPair[j];
-                            if (!paired.has(candidate)) {
-                                p2Id = candidate;
-                                break;
-                            }
+                            if (!paired.has(candidate)) { p2Id = candidate; break; }
                         }
                     }
 
                     if (p2Id) {
-                        // Determine Color Allocation between p1 and p2 using FIDE color preferences
                         let p1Obj = players.find(p => p.id === p1Id);
                         let p2Obj = players.find(p => p.id === p2Id);
                         
-                        let whiteId = p1Id;
-                        let blackId = p2Id;
-
+                        let whiteId = p1Id; let blackId = p2Id;
                         let p1Pref = getColorPreference(p1Obj);
                         let p2Pref = getColorPreference(p2Obj);
 
-                        if (p1Pref === 'B' && p2Pref !== 'B') {
-                            whiteId = p2Id;
-                            blackId = p1Id;
-                        } else if (p2Pref === 'W' && p1Pref !== 'W') {
-                            whiteId = p2Id;
-                            blackId = p1Id;
-                        }
+                        if (p1Pref === 'B' || p2Pref === 'W') {
+                            whiteId = p2Id; blackId = p1Id;
+                        } 
 
                         newMatches.push({
-                            id: `m-${nextRound}-${whiteId}-${blackId}`,
-                            round: nextRound,
-                            whiteId: whiteId,
-                            blackId: blackId,
-                            result: null,
-                            table: tableCounter++
+                            id: `m-${nextRound}-${whiteId}-${blackId}`, tournamentId: activeTournament.id,
+                            round: nextRound, whiteId: whiteId, blackId: blackId, result: null, table: tableCounter++
                         });
-                        paired.add(p1Id);
-                        paired.add(p2Id);
+                        paired.add(p1Id); paired.add(p2Id);
                     } else {
                         newMatches.push({
-                            id: `m-${nextRound}-${p1Id}-BYE`,
-                            round: nextRound,
-                            whiteId: p1Id,
-                            blackId: 'BYE',
-                            result: '1-0',
-                            table: tableCounter++
+                            id: `m-${nextRound}-${p1Id}-BYE`, tournamentId: activeTournament.id,
+                            round: nextRound, whiteId: p1Id, blackId: 'BYE', result: '1-0', table: tableCounter++
                         });
                         paired.add(p1Id);
                     }
                 }
 
-                // Update players color history for the records
-                const updatedPlayers = players.map(p => {
-                    const matchInNew = newMatches.find(m => m.whiteId === p.id || m.blackId === p.id);
-                    if (!matchInNew) return p;
-                    const colorAssigned = matchInNew.whiteId === p.id ? 'W' : 'B';
-                    return {
-                        ...p,
-                        colorHistory: [...(p.colorHistory || []), colorAssigned]
-                    };
-                });
+                for (const m of newMatches) {
+                    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', m.id), m);
+                }
 
-                setPlayers(updatedPlayers);
-                setMatches([...matches, ...newMatches]);
-                setCurrentRound(nextRound);
-                setSelectedHistoryRound(nextRound);
-                setActiveTab('matches');
+                // Update Color Histories
+                for (const p of players) {
+                    const matchInNew = newMatches.find(m => m.whiteId === p.id || m.blackId === p.id);
+                    if (matchInNew && matchInNew.blackId !== 'BYE') {
+                        const colorAssigned = matchInNew.whiteId === p.id ? 'W' : 'B';
+                        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'players', p.id), {
+                            colorHistory: [...(p.colorHistory || []), colorAssigned]
+                        }, { merge: true });
+                    }
+                }
+
+                await updateTournamentSettings({ currentRound: nextRound });
+                setSelectedHistoryRound(nextRound); setActiveTab('matches');
+                setIsEditMode(false); setSwapSource(null);
             };
 
-            const setMatchResult = (matchId, result) => {
-                setMatches(matches.map(m => m.id === matchId ? { ...m, result } : m));
+            const setMatchResult = async (matchId, result) => {
+                if (!user || isPublicViewer) return;
+                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', matchId), { result }, { merge: true });
+            };
+
+            const handleSwapClick = async (matchId, role, playerId) => {
+                if (!user || isPublicViewer) return;
+                if (!swapSource) {
+                    setSwapSource({ matchId, role, playerId });
+                } else {
+                    if (swapSource.matchId === matchId && swapSource.role === role) { setSwapSource(null); return; }
+                    const match1 = matches.find(m => m.id === swapSource.matchId);
+                    const match2 = matches.find(m => m.id === matchId);
+                    
+                    if (match1 && match2) {
+                        const match1Updates = { [swapSource.role]: playerId, result: null };
+                        const match2Updates = { [role]: swapSource.playerId, result: null };
+                        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', match1.id), match1Updates, { merge: true });
+                        await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'matches', match2.id), match2Updates, { merge: true });
+                    }
+                    setSwapSource(null);
+                }
             };
 
             const getPlayerName = (id) => players.find(p => p.id === id)?.name || id;
 
-            const filteredStandings = useMemo(() => {
-                if (standingsFilter === 'All') return standings;
-                return standings.filter(p => (p.category || 'Open') === standingsFilter);
-            }, [standings, standingsFilter]);
-
-            const renderStandingsTable = (dataToRender) => (
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse whitespace-nowrap">
-                        <thead>
-                            <tr className="bg-slate-800 text-white text-xs uppercase tracking-wider">
-                                <th className="px-4 py-4 font-semibold text-center w-12 rounded-tl-lg">Rk</th>
-                                <th className="px-4 py-4 font-semibold">{isTeamMode ? 'Team' : 'Player'}</th>
-                                <th className="px-4 py-4 font-semibold">Category</th>
-                                <th className="px-4 py-4 font-semibold text-center">Rtg</th>
-                                <th className="px-4 py-4 font-bold text-emerald-400 text-center text-sm" title={isTeamMode ? "Match Points (2 = Win, 1 = Draw)" : "Points"}>
-                                    {isTeamMode ? 'MP' : 'Pts'}
-                                </th>
-                                {isTeamMode && (
-                                    <th className="px-4 py-4 font-bold text-sky-400 text-center text-sm" title="Game Points (Board Points)">
-                                        GP
-                                    </th>
-                                )}
-                                {tieBreakOrder.filter(tb => tb.enabled).map((tb, index) => (
-                                    <th key={tb.id} className="px-4 py-4 font-semibold text-center text-slate-300" title={tb.name}>
-                                        TB{index + 1}
-                                    </th>
-                                ))}
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                            {dataToRender.map((player, index) => (
-                                <tr key={player.id} className="hover:bg-slate-50 transition-colors">
-                                    <td className="px-4 py-4 text-center font-bold text-slate-400">{index + 1}</td>
-                                    <td className="px-4 py-4 font-bold text-slate-800">{player.name}</td>
-                                    <td className="px-4 py-4 text-slate-600 text-sm">
-                                        <span className="bg-slate-100 px-2 py-1 rounded">
-                                            {player.category || 'Open'}
-                                        </span>
-                                    </td>
-                                    <td className="px-4 py-4 text-center text-slate-500 text-sm">{player.rating}</td>
-                                    <td className="px-4 py-4 text-center font-black text-indigo-600 text-lg">
-                                        {isTeamMode ? player.matchPoints : player.gamePoints}
-                                    </td>
-                                    {isTeamMode && (
-                                        <td className="px-4 py-4 text-center font-black text-sky-600 text-lg">
-                                            {player.gamePoints}
-                                        </td>
-                                    )}
-                                    {tieBreakOrder.filter(tb => tb.enabled).map((tb) => (
-                                        <td key={tb.id} className="px-4 py-4 text-center text-slate-500 text-sm font-medium">
-                                            {player[`tb_${tb.id}`]}
-                                        </td>
+            const renderStandingsTable = (dataToRender) => {
+                const tbOrder = activeTournament?.tieBreakOrder || DEFAULT_TIE_BREAKS;
+                const isTeam = activeTournament?.isTeamMode;
+                return (
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse whitespace-nowrap">
+                            <thead>
+                                <tr className="bg-slate-800 text-white text-xs uppercase tracking-wider">
+                                    <th className="px-4 py-4 font-semibold text-center w-12 rounded-tl-lg">Rk</th>
+                                    <th className="px-4 py-4 font-semibold">{isTeam ? 'Team' : 'Player'}</th>
+                                    <th className="px-4 py-4 font-semibold">Category</th>
+                                    <th className="px-4 py-4 font-semibold text-center">Rtg</th>
+                                    <th className="px-4 py-4 font-bold text-emerald-400 text-center text-sm">{isTeam ? 'MP' : 'Pts'}</th>
+                                    {isTeam && <th className="px-4 py-4 font-bold text-sky-400 text-center text-sm">GP</th>}
+                                    {tbOrder.filter(tb => tb.enabled).map((tb, index) => (
+                                        <th key={tb.id} className="px-4 py-4 font-semibold text-center text-slate-300">TB{index + 1}</th>
                                     ))}
                                 </tr>
-                            ))}
-                            {dataToRender.length === 0 && (
-                                <tr>
-                                    <td colSpan={11} className="px-4 py-12 text-center text-slate-400">
-                                        No matches or players found.
-                                    </td>
-                                </tr>
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-            );
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                                {dataToRender.map((player, index) => (
+                                    <tr key={player.id} className="hover:bg-slate-50 transition-colors">
+                                        <td className="px-4 py-4 text-center font-bold text-slate-400">{index + 1}</td>
+                                        <td className="px-4 py-4 font-bold text-slate-800">{player.name}</td>
+                                        <td className="px-4 py-4 text-slate-600 text-sm">
+                                            <span className="bg-slate-100 px-2 py-1 rounded">{player.category || 'Open'}</span>
+                                        </td>
+                                        <td className="px-4 py-4 text-center text-slate-500 text-sm">{player.rating}</td>
+                                        <td className="px-4 py-4 text-center font-black text-indigo-600 text-lg">
+                                            {isTeam ? player.matchPoints : player.gamePoints}
+                                        </td>
+                                        {isTeam && <td className="px-4 py-4 text-center font-black text-sky-600 text-lg">{player.gamePoints}</td>}
+                                        {tbOrder.filter(tb => tb.enabled).map((tb) => (
+                                            <td key={tb.id} className="px-4 py-4 text-center text-slate-500 text-sm font-medium">{player[`tb_${tb.id}`]}</td>
+                                        ))}
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                );
+            };
 
+            // Login Screen (Only if not viewer and not logged in)
+            if (!user && !isPublicViewer) {
+                return (
+                    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+                        <div className="max-w-md w-full bg-white p-8 rounded-2xl shadow-lg border border-slate-200 text-center">
+                            <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <span className="text-2xl">♟️</span>
+                            </div>
+                            <h1 className="text-2xl font-extrabold text-slate-800 mb-2">Swiss Manager Cloud</h1>
+                            <p className="text-slate-500 mb-8">Secure your tournaments. Log in with Google to manage your private chess events.</p>
+                            
+                            {errorMessage && <div className="mb-6 p-3 bg-red-100 border-l-4 border-red-500 text-red-700 text-sm text-left">{errorMessage}</div>}
+
+                            <button onClick={handleLogin} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-xl transition-all shadow-md flex items-center justify-center gap-2">
+                                <svg className="w-5 h-5 bg-white rounded-full p-0.5 text-indigo-600" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                                </svg>
+                                Continue with Google
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            // Dashboard (Admin only)
+            if (user && !activeTournament && !isPublicViewer) {
+                return (
+                    <div className="min-h-screen bg-slate-50 p-4 md:p-8">
+                        <div className="max-w-4xl mx-auto">
+                            <header className="flex justify-between items-center mb-10 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                                <div>
+                                    <h1 className="text-2xl font-extrabold text-slate-800">My Tournaments</h1>
+                                    <p className="text-sm text-slate-500 mt-1">Logged in as {user.email}</p>
+                                </div>
+                                <div className="flex gap-3">
+                                    <button onClick={createNewTournament} className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-5 rounded-lg transition-all shadow-sm">+ New</button>
+                                    <button onClick={() => signOut(auth)} className="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded-lg transition-all">Logout</button>
+                                </div>
+                            </header>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {tournaments.map(t => (
+                                    <div key={t.id} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col">
+                                        <h3 className="text-lg font-bold text-indigo-900 mb-1">{t.name}</h3>
+                                        <p className="text-xs text-slate-400 mb-4">Created: {new Date(t.createdAt).toLocaleDateString()}</p>
+                                        
+                                        <div className="mt-auto flex justify-between items-center gap-2">
+                                            <button onClick={() => setActiveTournament(t)} className="flex-1 bg-slate-100 hover:bg-indigo-50 text-indigo-700 font-bold py-2 px-4 rounded-lg text-center transition-colors">
+                                                Open Dashboard
+                                            </button>
+                                            <button onClick={() => copyShareLink(t.id)} className={`py-2 px-4 font-bold rounded-lg transition-colors ${copySuccess === t.id ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-600'}`}>
+                                                {copySuccess === t.id ? '✓ Copied' : '🔗 Share'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if(isPublicViewer && !activeTournament) {
+                return <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+                    <p className="text-slate-500 font-bold text-lg animate-pulse">Loading Tournament Data...</p>
+                </div>;
+            }
+
+            // Tournament View (Admin & Public)
             return (
                 <div className="min-h-screen bg-slate-50 text-slate-800 font-sans p-4 md:p-8">
                     <div className="max-w-6xl mx-auto">
                         <header className="flex flex-col xl:flex-row justify-between items-center mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                            <div className="mb-4 xl:mb-0 text-center xl:text-left flex-1">
-                                <h1 className="text-3xl font-extrabold text-indigo-900 tracking-tight">Swiss Chess Manager</h1>
-                                <p className="text-slate-500 mt-1">Local Storage Mode • FIDE-Compliant Color Balance & Tie-Breaks</p>
+                            <div className="mb-4 xl:mb-0 text-center xl:text-left flex flex-col items-start">
+                                {!isPublicViewer && (
+                                    <button onClick={() => setActiveTournament(null)} className="text-sm text-slate-500 hover:text-indigo-600 mb-2 font-semibold">← Dashboard</button>
+                                )}
+                                <h1 className="text-2xl md:text-3xl font-extrabold text-indigo-900 tracking-tight">{activeTournament.name}</h1>
+                                {isPublicViewer && <span className="bg-indigo-100 text-indigo-800 text-xs font-bold px-2 py-1 rounded mt-2">Public Viewer Mode</span>}
                             </div>
                             
-                            <div className="flex flex-col xl:flex-row items-center gap-6">
-                                <div className="flex flex-wrap justify-center xl:justify-end gap-2 bg-slate-100 p-1 rounded-lg">
-                                    <button 
-                                        onClick={() => setActiveTab('setup')}
-                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'setup' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
-                                    >
-                                        Players
-                                    </button>
-                                    <button 
-                                        onClick={() => setActiveTab('matches')}
-                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'matches' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
-                                    >
-                                        Play Round {currentRound > 0 ? currentRound : ''}
-                                    </button>
-                                    <button 
-                                        onClick={() => setActiveTab('results')}
-                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'results' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
-                                    >
-                                        Results & History
-                                    </button>
-                                    <button 
-                                        onClick={() => setActiveTab('standings')}
-                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'standings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
-                                    >
-                                        Live Standings
-                                    </button>
-                                    <button 
-                                        onClick={() => setActiveTab('settings')}
-                                        className={`px-3 py-2 text-sm font-semibold rounded-md transition-colors ${activeTab === 'settings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}
-                                    >
-                                        Settings
-                                    </button>
-                                </div>
-
-                                <div className="flex flex-col items-center xl:items-end gap-2">
-                                    <button 
-                                        onClick={resetTournament} 
-                                        className="text-xs bg-red-100 text-red-600 hover:bg-red-200 px-3 py-1.5 rounded-md font-semibold transition-colors border border-red-200">
-                                        Clear All Data
-                                    </button>
-                                </div>
+                            <div className="flex gap-2 bg-slate-100 p-1 rounded-lg flex-wrap justify-center">
+                                {!isPublicViewer && <button onClick={() => setActiveTab('setup')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'setup' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Players</button>}
+                                <button onClick={() => setActiveTab('standings')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'standings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Live Standings</button>
+                                <button onClick={() => setActiveTab('matches')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'matches' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Round {activeTournament.currentRound > 0 ? activeTournament.currentRound : ''}</button>
+                                <button onClick={() => setActiveTab('results')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'results' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>History</button>
+                                {!isPublicViewer && <button onClick={() => setActiveTab('settings')} className={`px-3 py-2 text-sm font-semibold rounded-md ${activeTab === 'settings' ? 'bg-white shadow text-indigo-700' : 'text-slate-600 hover:bg-slate-200'}`}>Settings</button>}
                             </div>
                         </header>
 
-                        {errorMessage && (
-                            <div className="mb-6 p-4 bg-red-100 border-l-4 border-red-500 text-red-700 rounded shadow-sm font-medium flex justify-between">
-                                <span>{errorMessage}</span>
-                                <button onClick={() => setErrorMessage('')} className="text-red-700 font-bold">&times;</button>
-                            </div>
-                        )}
-
-                        {activeTab === 'setup' && (
+                        {/* PLAYERS TAB (ADMIN ONLY) */}
+                        {!isPublicViewer && activeTab === 'setup' && (
                             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                                 <div className="p-6 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
                                     <h2 className="text-xl font-bold text-slate-800">Tournament Roster</h2>
-                                    {currentRound === 0 && (
-                                        <button 
-                                            onClick={generatePairings}
-                                            className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold transition-colors shadow-sm"
-                                        >
-                                            Start Round 1
-                                        </button>
+                                    {activeTournament.currentRound === 0 && (
+                                        <button onClick={generatePairings} className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold shadow-sm">Start Round 1</button>
                                     )}
                                 </div>
-                                
                                 <div className="p-6">
-                                    {currentRound === 0 && (
-                                        <>
-                                            <div className="mb-6 p-4 bg-slate-100 rounded-xl flex flex-wrap items-center gap-6 border border-slate-200">
-                                                <div className="flex items-center gap-3">
-                                                    <span className="font-semibold text-slate-700">Tournament Mode:</span>
-                                                    <select 
-                                                        value={isTeamMode ? 'team' : 'individual'}
-                                                        onChange={(e) => setIsTeamMode(e.target.value === 'team')}
-                                                        className="px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-medium bg-white"
-                                                    >
-                                                        <option value="individual">Individual</option>
-                                                        <option value="team">Team (Beregu)</option>
-                                                    </select>
-                                                </div>
-                                                {isTeamMode && (
-                                                    <div className="flex items-center gap-3 border-l border-slate-300 pl-6">
-                                                        <span className="font-semibold text-slate-700">Boards per Team:</span>
-                                                        <input 
-                                                            type="number" min="1" max="20" 
-                                                            value={boardsPerTeam} 
-                                                            onChange={(e) => setBoardsPerTeam(parseInt(e.target.value) || 1)} 
-                                                            className="w-24 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-medium text-center bg-white"
-                                                        />
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            <form onSubmit={addPlayer} className="flex flex-col md:flex-row gap-3 mb-8">
-                                                <input 
-                                                    type="text" 
-                                                    placeholder={isTeamMode ? "Team Name" : "Player Name"}
-                                                    value={newPlayerName}
-                                                    onChange={(e) => setNewPlayerName(e.target.value)}
-                                                    className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                                                />
-                                                <input 
-                                                    type="number" 
-                                                    placeholder={isTeamMode ? "Avg Rating" : "Rating"}
-                                                    value={newPlayerRating}
-                                                    onChange={(e) => setNewPlayerRating(e.target.value)}
-                                                    className="w-full md:w-32 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                                                />
-                                                <select
-                                                    value={newPlayerCategory}
-                                                    onChange={(e) => setNewPlayerCategory(e.target.value)}
-                                                    className="w-full md:w-48 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
-                                                >
-                                                    {TOURNAMENT_CATEGORIES.map(cat => (
-                                                        <option key={cat} value={cat}>{cat}</option>
-                                                    ))}
-                                                </select>
-                                                <button type="submit" className="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 rounded-lg font-semibold transition-colors shadow-sm">
-                                                    Add
-                                                </button>
-                                            </form>
-                                        </>
+                                    {activeTournament.currentRound === 0 && (
+                                        <form onSubmit={addPlayer} className="flex flex-col md:flex-row gap-3 mb-8">
+                                            <input type="text" placeholder="Name" value={newPlayerName} onChange={(e) => setNewPlayerName(e.target.value)} className="flex-1 px-4 py-2 border rounded-lg focus:ring-2" />
+                                            <input type="number" placeholder="Rating" value={newPlayerRating} onChange={(e) => setNewPlayerRating(e.target.value)} className="w-32 px-4 py-2 border rounded-lg focus:ring-2" />
+                                            <select value={newPlayerCategory} onChange={(e) => setNewPlayerCategory(e.target.value)} className="px-4 py-2 border rounded-lg focus:ring-2 bg-white">
+                                                {TOURNAMENT_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                                            </select>
+                                            <button type="submit" className="bg-emerald-500 text-white px-6 py-2 rounded-lg font-semibold">Add</button>
+                                        </form>
                                     )}
-
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full text-left border-collapse">
-                                            <thead>
-                                                <tr className="bg-slate-50 text-slate-500 text-sm uppercase tracking-wider">
-                                                    <th className="px-4 py-3 font-medium border-b border-slate-200">Name</th>
-                                                    <th className="px-4 py-3 font-medium border-b border-slate-200">Rating</th>
-                                                    <th className="px-4 py-3 font-medium border-b border-slate-200">Category</th>
-                                                    <th className="px-4 py-3 font-medium border-b border-slate-200">Action</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {players.length === 0 ? (
-                                                    <tr><td colSpan="4" className="px-4 py-8 text-center text-slate-400">No {isTeamMode ? 'teams' : 'players'} added yet.</td></tr>
-                                                ) : (
-                                                    players.map((p, index) => (
-                                                        <tr key={p.id} className="border-b border-slate-100 hover:bg-slate-50/50">
-                                                            <td className="px-4 py-3 font-medium text-slate-800">{index + 1}. {p.name}</td>
-                                                            <td className="px-4 py-3 text-slate-600">{p.rating}</td>
-                                                            <td className="px-4 py-3 text-slate-600">
-                                                                <span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-semibold">
-                                                                    {p.category || 'Open'}
-                                                                </span>
-                                                            </td>
-                                                            <td className="px-4 py-3">
-                                                                {currentRound === 0 && (
-                                                                    <button onClick={() => removePlayer(p.id)} className="text-red-500 hover:text-red-700 text-sm font-medium">Remove</button>
-                                                                )}
-                                                            </td>
-                                                        </tr>
-                                                    ))
-                                                )}
-                                            </tbody>
-                                        </table>
+                                    <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                        {players.map((p, i) => (
+                                            <div key={p.id} className="p-3 bg-slate-50 border border-slate-200 rounded flex justify-between items-center">
+                                                <div><span className="font-bold">{i+1}. {p.name}</span> <span className="text-xs text-slate-500">({p.rating})</span></div>
+                                                {activeTournament.currentRound === 0 && <button onClick={() => removePlayer(p.id)} className="text-red-500 text-sm font-bold">X</button>}
+                                            </div>
+                                        ))}
                                     </div>
                                 </div>
                             </div>
                         )}
 
+                        {/* MATCHES TAB */}
                         {activeTab === 'matches' && (
                             <div className="space-y-6">
-                                {currentRound === 0 ? (
+                                {activeTournament.currentRound === 0 ? (
                                     <div className="text-center py-12 bg-white rounded-2xl shadow-sm border border-slate-200">
-                                        <p className="text-slate-500 text-lg mb-4">Tournament hasn't started yet.</p>
-                                        <button 
-                                            onClick={generatePairings}
-                                            className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-bold shadow-md"
-                                        >
-                                            Generate Round 1
-                                        </button>
+                                        <p className="text-slate-500 mb-4">Tournament hasn't started yet.</p>
+                                        {!isPublicViewer && <button onClick={generatePairings} className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold">Generate Round 1</button>}
                                     </div>
                                 ) : (
                                     <>
-                                        <div className="flex justify-between items-center bg-white p-5 rounded-xl shadow-sm border border-slate-200">
-                                            <h2 className="text-xl font-bold text-slate-800">Round {currentRound} Active Pairings</h2>
-                                            <button 
-                                                onClick={generatePairings}
-                                                className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold transition-colors shadow-sm"
-                                            >
-                                                Close Round & Generate Next
-                                            </button>
+                                        <div className="flex flex-col md:flex-row justify-between items-center bg-white p-5 rounded-xl shadow-sm border gap-4">
+                                            <h2 className="text-xl font-bold text-slate-800">Round {activeTournament.currentRound}</h2>
+                                            {!isPublicViewer && (
+                                                <div className="flex gap-2">
+                                                    <button onClick={() => {setIsEditMode(!isEditMode); setSwapSource(null);}} className={`px-4 py-2 rounded-lg font-semibold border ${isEditMode ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-700'}`}>🛠 Arbiter Edit</button>
+                                                    <button onClick={generatePairings} className="bg-indigo-600 text-white px-5 py-2 rounded-lg font-semibold">Next Round</button>
+                                                </div>
+                                            )}
                                         </div>
                                         
-                                        <div className="grid gap-4 md:grid-cols-2">
-                                            {matches.filter(m => m.round === currentRound).sort((a, b) => (a.table || 999) - (b.table || 999)).map((match, idx) => (
-                                                <div key={match.id} className="bg-white p-5 pt-8 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between relative">
-                                                    <div className="absolute top-0 left-1/2 transform -translate-x-1/2 bg-indigo-600 text-white text-xs font-bold px-4 py-1.5 rounded-b-lg uppercase tracking-wider shadow-sm">
+                                        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                                            {matches.filter(m => m.round === activeTournament.currentRound).sort((a, b) => (a.table || 999) - (b.table || 999)).map((match, idx) => (
+                                                <div key={match.id} className={`p-4 pt-8 rounded-xl shadow-sm border flex flex-col relative ${isEditMode ? 'bg-amber-50 border-amber-300' : 'bg-white border-slate-200'}`}>
+                                                    <div className="absolute top-0 left-1/2 transform -translate-x-1/2 bg-indigo-600 text-white text-[10px] font-bold px-4 py-1 rounded-b-lg">
                                                         Table {match.table || idx + 1}
                                                     </div>
+                                                    
                                                     <div className="flex justify-between items-center mb-4">
-                                                        <div className="flex flex-col items-center flex-1">
-                                                            <div className="w-8 h-8 bg-white border-2 border-slate-400 rounded-full mb-2 shadow-inner" title="White Pieces"></div>
-                                                            <span className="font-semibold text-slate-800 text-center">{getPlayerName(match.whiteId)}</span>
+                                                        <div onClick={() => isEditMode ? handleSwapClick(match.id, 'whiteId', match.whiteId) : null} className={`flex flex-col items-center flex-1 ${isEditMode ? 'cursor-pointer hover:bg-amber-200 p-2 rounded' : ''} ${swapSource?.role === 'whiteId' && swapSource?.matchId === match.id ? 'bg-amber-300 rounded' : ''}`}>
+                                                            <div className="w-6 h-6 bg-white border border-slate-400 rounded-full mb-1"></div>
+                                                            <span className="font-semibold text-center text-sm">{getPlayerName(match.whiteId)}</span>
                                                         </div>
-                                                        <div className="px-4 text-slate-400 font-medium text-sm">VS</div>
-                                                        <div className="flex flex-col items-center flex-1">
-                                                            {match.blackId !== 'BYE' && (
+                                                        <div className="text-xs font-bold text-slate-400 px-2">VS</div>
+                                                        <div onClick={() => isEditMode && match.blackId !== 'BYE' ? handleSwapClick(match.id, 'blackId', match.blackId) : null} className={`flex flex-col items-center flex-1 ${isEditMode && match.blackId !== 'BYE' ? 'cursor-pointer hover:bg-amber-200 p-2 rounded' : ''} ${swapSource?.role === 'blackId' && swapSource?.matchId === match.id ? 'bg-amber-300 rounded' : ''}`}>
+                                                            {match.blackId !== 'BYE' ? (
                                                                 <>
-                                                                    <div className="w-8 h-8 bg-slate-800 border-2 border-slate-900 rounded-full mb-2 shadow-inner" title="Black Pieces"></div>
-                                                                    <span className="font-semibold text-slate-800 text-center">{getPlayerName(match.blackId)}</span>
+                                                                    <div className="w-6 h-6 bg-slate-800 rounded-full mb-1"></div>
+                                                                    <span className="font-semibold text-center text-sm">{getPlayerName(match.blackId)}</span>
                                                                 </>
-                                                            )}
+                                                            ) : <span className="font-semibold text-slate-400 italic text-sm">BYE</span>}
                                                         </div>
                                                     </div>
 
-                                                    {match.blackId !== 'BYE' ? (
-                                                        <div className="flex justify-center gap-2 mt-4 bg-slate-50 p-3 rounded-xl border border-slate-100">
-                                                            {isTeamMode ? (
-                                                                <div className="flex flex-col items-center w-full">
-                                                                    <label className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">Set Match Result</label>
-                                                                    <select 
-                                                                        value={match.result ? match.result.split('-')[0] : ''}
-                                                                        onChange={(e) => {
-                                                                            if (e.target.value === '') return;
-                                                                            const w = parseFloat(e.target.value);
-                                                                            const b = boardsPerTeam - w;
-                                                                            setMatchResult(match.id, `${w}-${b}`);
-                                                                        }}
-                                                                        className="w-full max-w-xs px-4 py-3 border-2 border-indigo-200 rounded-lg font-bold text-center text-indigo-900 bg-white focus:outline-none focus:border-indigo-500 transition-colors cursor-pointer"
-                                                                    >
-                                                                        <option value="" disabled>Select Team Score...</option>
-                                                                        {Array.from({length: (boardsPerTeam * 2) + 1}).map((_, i) => {
-                                                                            const val = i * 0.5;
-                                                                            return (
-                                                                                <option key={val} value={val}>
-                                                                                    {val} - {boardsPerTeam - val}
-                                                                                </option>
-                                                                            );
-                                                                        })}
-                                                                    </select>
-                                                                </div>
-                                                            ) : (
+                                                    {match.blackId !== 'BYE' && (
+                                                        <div className="flex justify-center gap-1 mt-auto bg-slate-50 p-2 rounded border">
+                                                            {!isPublicViewer && !isEditMode ? (
                                                                 <>
-                                                                    <button 
-                                                                        onClick={() => setMatchResult(match.id, '1-0')}
-                                                                        className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${match.result === '1-0' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'}`}
-                                                                    >
-                                                                        1 - 0
-                                                                    </button>
-                                                                    <button 
-                                                                        onClick={() => setMatchResult(match.id, '0.5-0.5')}
-                                                                        className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${match.result === '0.5-0.5' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'}`}
-                                                                    >
-                                                                        ½ - ½
-                                                                    </button>
-                                                                    <button 
-                                                                        onClick={() => setMatchResult(match.id, '0-1')}
-                                                                        className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${match.result === '0-1' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'}`}
-                                                                    >
-                                                                        0 - 1
-                                                                    </button>
+                                                                    <button onClick={() => setMatchResult(match.id, '1-0')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '1-0' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>1-0</button>
+                                                                    <button onClick={() => setMatchResult(match.id, '0.5-0.5')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '0.5-0.5' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>½-½</button>
+                                                                    <button onClick={() => setMatchResult(match.id, '0-1')} className={`flex-1 py-1.5 text-xs font-bold rounded ${match.result === '0-1' ? 'bg-indigo-600 text-white' : 'bg-white border text-slate-600'}`}>0-1</button>
                                                                 </>
+                                                            ) : (
+                                                                <div className="font-bold text-indigo-800 text-center w-full py-1.5">{match.result || "Playing"}</div>
                                                             )}
-                                                        </div>
-                                                    ) : (
-                                                        <div className="text-center mt-4 py-3 bg-emerald-50 border border-emerald-100 text-emerald-700 font-bold rounded-xl text-sm">
-                                                            Automatic Win (BYE)
                                                         </div>
                                                     )}
                                                 </div>
@@ -739,148 +646,59 @@
                             </div>
                         )}
 
+                        {/* RESULTS TAB */}
                         {activeTab === 'results' && (
-                            <div className="space-y-6">
-                                {currentRound === 0 ? (
-                                    <div className="text-center py-12 bg-white rounded-2xl shadow-sm border border-slate-200">
-                                        <p className="text-slate-500 text-lg mb-4">No rounds have been played yet.</p>
-                                    </div>
-                                ) : (
+                            <div className="space-y-4">
+                                {activeTournament.currentRound === 0 ? <p className="text-center p-8 bg-white rounded-xl">No matches yet.</p> : (
                                     <>
-                                        <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 overflow-x-auto">
-                                            <div className="flex gap-2 min-w-max">
-                                                <span className="py-2 pr-4 font-bold text-slate-700">Select Round:</span>
-                                                {Array.from({length: currentRound}).map((_, i) => {
-                                                    const roundNum = i + 1;
-                                                    return (
-                                                        <button
-                                                            key={roundNum}
-                                                            onClick={() => setSelectedHistoryRound(roundNum)}
-                                                            className={`px-4 py-2 rounded-lg font-bold transition-all ${
-                                                                selectedHistoryRound === roundNum 
-                                                                    ? 'bg-indigo-600 text-white shadow-md' 
-                                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                                            }`}
-                                                        >
-                                                            Round {roundNum}
-                                                        </button>
-                                                    );
-                                                })}
-                                            </div>
+                                        <div className="bg-white p-4 rounded-xl border flex gap-2 overflow-x-auto">
+                                            {Array.from({length: activeTournament.currentRound}).map((_, i) => (
+                                                <button key={i+1} onClick={() => setSelectedHistoryRound(i+1)} className={`px-4 py-1.5 rounded font-bold ${selectedHistoryRound === i+1 ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}>R{i+1}</button>
+                                            ))}
                                         </div>
-
-                                        <div className="grid lg:grid-cols-3 gap-6">
-                                            <div className="lg:col-span-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col max-h-[800px]">
-                                                <div className="p-4 border-b border-slate-100 bg-slate-50">
-                                                    <h3 className="font-bold text-slate-800 text-lg">Round {selectedHistoryRound} Results</h3>
+                                        <div className="bg-white rounded-xl border p-4 space-y-2 max-h-[600px] overflow-y-auto">
+                                            {matches.filter(m => m.round === selectedHistoryRound).sort((a, b) => (a.table || 999) - (b.table || 999)).map(match => (
+                                                <div key={match.id} className="p-3 bg-slate-50 border rounded-lg flex items-center justify-between text-sm">
+                                                    <div className="font-bold text-slate-400 w-10">T.{match.table}</div>
+                                                    <div className="flex-1 text-right font-semibold pr-3">{getPlayerName(match.whiteId)}</div>
+                                                    <div className="px-3 py-1 bg-white border rounded font-bold text-indigo-700 min-w-[3rem] text-center">{match.blackId === 'BYE' ? '1-0' : match.result || '-'}</div>
+                                                    <div className="flex-1 font-semibold pl-3">{match.blackId === 'BYE' ? '(BYE)' : getPlayerName(match.blackId)}</div>
                                                 </div>
-                                                <div className="overflow-y-auto p-4 space-y-3">
-                                                    {matches.filter(m => m.round === selectedHistoryRound).sort((a, b) => (a.table || 999) - (b.table || 999)).map((match, i) => (
-                                                        <div key={match.id} className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between text-sm">
-                                                            <div className="text-xs text-slate-400 font-bold w-12 shrink-0">T.{match.table || i + 1}</div>
-                                                            <div className="flex-1 text-right font-semibold text-slate-800 pr-3">
-                                                                {getPlayerName(match.whiteId)}
-                                                            </div>
-                                                            <div className="px-3 py-1 bg-white border border-slate-300 rounded font-bold text-indigo-700 whitespace-nowrap min-w-[3rem] text-center">
-                                                                {match.blackId === 'BYE' ? '1-0' : match.result || '-'}
-                                                            </div>
-                                                            <div className="flex-1 text-left font-semibold text-slate-800 pl-3">
-                                                                {match.blackId === 'BYE' ? '(BYE)' : getPlayerName(match.blackId)}
-                                                            </div>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-
-                                            <div className="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col max-h-[800px]">
-                                                <div className="p-4 border-b border-slate-100 bg-slate-50">
-                                                    <h3 className="font-bold text-slate-800 text-lg">Standings After Round {selectedHistoryRound}</h3>
-                                                    <p className="text-xs text-slate-500">Calculated based only on matches up to Round {selectedHistoryRound}.</p>
-                                                </div>
-                                                <div className="overflow-y-auto">
-                                                    {renderStandingsTable(historicalStandings)}
-                                                </div>
-                                            </div>
+                                            ))}
                                         </div>
                                     </>
                                 )}
                             </div>
                         )}
 
+                        {/* STANDINGS TAB */}
                         {activeTab === 'standings' && (
-                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                                <div className="p-6 border-b border-slate-100 bg-slate-50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                                    <div>
-                                        <h2 className="text-xl font-bold text-slate-800">Live Standings</h2>
-                                        <p className="text-xs text-slate-500 mt-1">
-                                            Active Tie-Breaks: {tieBreakOrder.filter(tb => tb.enabled).map((tb, i) => `TB${i+1}: ${tb.code}`).join(' | ')}
-                                        </p>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-sm font-semibold text-slate-600">Filter Category:</span>
-                                        <select 
-                                            value={standingsFilter}
-                                            onChange={(e) => setStandingsFilter(e.target.value)}
-                                            className="px-3 py-1.5 border border-slate-300 rounded-md text-sm font-medium focus:ring-2 focus:ring-indigo-500 bg-white"
-                                        >
-                                            <option value="All">All Categories</option>
-                                            {Array.from(new Set(players.map(p => p.category || 'Open'))).sort().map(cat => (
-                                                <option key={cat} value={cat}>{cat}</option>
-                                            ))}
-                                        </select>
-                                    </div>
+                            <div className="bg-white rounded-2xl shadow-sm border overflow-hidden">
+                                <div className="p-4 bg-slate-50 border-b flex justify-between items-center">
+                                    <h2 className="font-bold text-slate-800">Live Standings</h2>
+                                    <select value={standingsFilter} onChange={(e) => setStandingsFilter(e.target.value)} className="px-3 py-1 border rounded text-sm bg-white">
+                                        <option value="All">All Categories</option>
+                                        {Array.from(new Set(players.map(p => p.category || 'Open'))).sort().map(cat => (
+                                            <option key={cat} value={cat}>{cat}</option>
+                                        ))}
+                                    </select>
                                 </div>
                                 {renderStandingsTable(filteredStandings)}
                             </div>
                         )}
 
-                        {activeTab === 'settings' && (
-                            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                                <div className="p-6 border-b border-slate-100 bg-slate-50">
-                                    <h2 className="text-xl font-bold text-slate-800">Tournament Settings</h2>
-                                    <p className="text-sm text-slate-500 mt-1">Configure Tie-Break priority and visibility.</p>
-                                </div>
-                                <div className="p-6">
-                                    <h3 className="text-lg font-semibold text-slate-800 mb-4">Tie-Break Order Priority</h3>
-                                    <div className="space-y-3 max-w-2xl">
-                                        {tieBreakOrder.map((tb, index) => (
-                                            <div key={tb.id} className="flex items-center justify-between p-4 bg-slate-50 border border-slate-200 rounded-lg">
-                                                <div className="flex items-center gap-3">
-                                                    <input 
-                                                        type="checkbox"
-                                                        checked={tb.enabled}
-                                                        onChange={() => toggleTieBreak(index)}
-                                                        className="w-5 h-5 text-indigo-600 rounded focus:ring-indigo-500 cursor-pointer"
-                                                    />
-                                                    <span className={`font-medium ${tb.enabled ? 'text-slate-800' : 'text-slate-400 line-through'}`}>
-                                                        {tb.name} ({tb.code})
-                                                    </span>
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <button 
-                                                        onClick={() => moveTieBreak(index, -1)}
-                                                        disabled={index === 0}
-                                                        className="p-2 bg-white border border-slate-300 rounded hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed text-slate-600 shadow-sm"
-                                                        title="Move Priority Up"
-                                                    >
-                                                        ▲
-                                                    </button>
-                                                    <button 
-                                                        onClick={() => moveTieBreak(index, 1)}
-                                                        disabled={index === tieBreakOrder.length - 1}
-                                                        className="p-2 bg-white border border-slate-300 rounded hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed text-slate-600 shadow-sm"
-                                                        title="Move Priority Down"
-                                                    >
-                                                        ▼
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
+                        {/* SETTINGS TAB (ADMIN) */}
+                        {!isPublicViewer && activeTab === 'settings' && (
+                            <div className="bg-white rounded-2xl shadow-sm border p-6">
+                                <h2 className="text-xl font-bold mb-4">Danger Zone</h2>
+                                <button onClick={async () => {
+                                    if(confirm("Permanently delete this tournament?")) {
+                                        await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tournaments', activeTournament.id));
+                                        setActiveTournament(null);
+                                    }
+                                }} className="bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded font-bold">Delete Tournament</button>
                             </div>
                         )}
-
                     </div>
                 </div>
             );
